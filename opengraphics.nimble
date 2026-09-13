@@ -2,7 +2,7 @@
 
 version       = "0.1.0"
 author        = "George Lemon"
-description   = "A new awesome nimble package"
+description   = "Open parsers and writers for popular graphics file formats"
 license       = "MIT"
 srcDir        = "src"
 
@@ -10,3 +10,4 @@ srcDir        = "src"
 # Dependencies
 
 requires "nim >= 2.2.10"
+requires "zlib >= 0.2.0"

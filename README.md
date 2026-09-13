@@ -31,7 +31,7 @@ let doc = openPsd("poster.psd")
 echo doc.width, "x", doc.height, " layers: ", doc.layerCount
 for node in doc.layerTree():
   echo node.layer.displayName()
-doc.composite.savePpm("preview.ppm")
+doc.composite.saveBmp("preview.bmp") # BMP opens in macOS Preview
 ```
 
 ### ❤ Contributions & Support
