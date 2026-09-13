@@ -69,7 +69,7 @@ proc parseName(lx: var Lexer): string =
     if lx.s[lx.pos] == '#' and lx.pos + 2 < lx.s.len and
         lx.s[lx.pos + 1] in HexDigits and lx.s[lx.pos + 2] in HexDigits:
       try:
-        result.add(chr(parseHexInt(lx.s[lx.pos + 1 .. lx.pos + 2])))
+        result.add(chr(parseHexInt(lx.s.slice(lx.pos + 1, lx.pos + 3))))
       except ValueError:
         pdfFail("bad # escape in PDF name")
       lx.pos += 3
@@ -192,7 +192,7 @@ proc parseNumberOrRef(lx: var Lexer): CosObj =
     else:
       inc digits
     inc lx.pos
-  let tok = lx.s[start ..< lx.pos]
+  let tok = lx.s.slice(start, lx.pos)
   if digits == 0:
     pdfFail("bad PDF number at offset " & $start)
   if not hasDot:
@@ -261,7 +261,7 @@ proc parseCosValue*(lx: var Lexer): CosObj =
           return CosObj(kind: coNull)
     pdfFail("unsupported PDF token at offset " & $lx.pos)
 
-proc parseStreamBody*(data: string, pos: int, length: int): string =
+proc parseStreamBody*(data: PdfSource, pos: int, length: int): string =
   ## Slice `length` raw bytes after `stream` + EOL. The caller resolves
   ## /Length (direct integer here; indirect goes through docmodel).
   var p = pos
@@ -275,7 +275,7 @@ proc parseStreamBody*(data: string, pos: int, length: int): string =
     pdfFail("expected EOL after 'stream' keyword at offset " & $pos)
   if length < 0 or p + length > data.len:
     pdfFail("stream length " & $length & " out of range at offset " & $p)
-  result = data[p ..< p + length]
+  result = data.slice(p, p + length)
   var q = p + length
   # optional EOL before endstream is not part of the data
   if q < data.len and data[q] == '\x0D':
@@ -284,10 +284,10 @@ proc parseStreamBody*(data: string, pos: int, length: int): string =
       inc q
   elif q < data.len and data[q] == '\x0A':
     inc q
-  if not data.continuesWith("endstream", q):
+  if not data.continuesWithAt("endstream", q):
     pdfFail("expected 'endstream' at offset " & $q)
 
-proc parseIndirect*(data: string, offset: int):
+proc parseIndirect*(data: PdfSource, offset: int):
     tuple[num, gen: int, obj: CosObj] =
   ## Parse one `N G obj ... endobj` at `offset`. Stream dictionaries
   ## with a direct integer /Length become coStream; an indirect

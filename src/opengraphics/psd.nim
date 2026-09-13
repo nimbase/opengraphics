@@ -9,6 +9,7 @@ import psd/rle
 import psd/pixels
 import psd/layers
 import psd/document
+import exporting
 
 export types
 export reader
@@ -19,3 +20,4 @@ export rle
 export pixels
 export layers
 export document
+export exporting

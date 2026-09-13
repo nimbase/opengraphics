@@ -22,10 +22,11 @@ type
     entries*: Table[int, XRefEntry]
     root*: CosObj ## /Root reference from the newest trailer
     encrypt*: CosObj ## /Encrypt (coNull when absent)
+    idFirst*: string ## first /ID string ("" when absent; never encrypted)
     size*: int ## /Size from the newest trailer
 
-proc parseStartxref(data: string, limits: PdfLimits): int =
-  let tail = data[max(0, data.len - limits.maxScanBytes) ..< data.len]
+proc parseStartxref(data: PdfSource, limits: PdfLimits): int =
+  let tail = data.slice(max(0, data.len - limits.maxScanBytes), data.len)
   let sx = rfind(tail, "startxref")
   if sx < 0:
     pdfFail("PDF trailer not found (no startxref near EOF)")
@@ -35,7 +36,7 @@ proc parseStartxref(data: string, limits: PdfLimits): int =
     pdfFail("startxref offset out of range: " & $off)
   off
 
-proc parseClassicSection(data: string, off: int, limits: PdfLimits,
+proc parseClassicSection(data: PdfSource, off: int, limits: PdfLimits,
     entries: var Table[int, XRefEntry]): CosObj =
   ## Parse one classic table at off; merge entries (caller decides
   ## precedence) and return the trailer dictionary.
@@ -76,8 +77,8 @@ proc parseClassicSection(data: string, off: int, limits: PdfLimits,
         pdfFail("bad xref entry flag, expected n or f at offset " &
           $(lx.pos - 1))
 
-proc parseXRef*(data: string, limits = defaultPdfLimits()): XRef =
-  var off = parseStartxref(data, limits)
+proc parseXRef*(src: PdfSource, limits = defaultPdfLimits()): XRef =
+  var off = parseStartxref(src, limits)
   var entries = initTable[int, XRefEntry]()
   var newestTrailer: CosObj = CosObj(kind: coNull)
   var first = true
@@ -86,10 +87,10 @@ proc parseXRef*(data: string, limits = defaultPdfLimits()): XRef =
     if sections > limits.maxObjects:
       pdfFail("too many xref sections (possible /Prev cycle)")
     inc sections
-    if off + 4 > data.len:
+    if off + 4 > src.len:
       pdfFail("xref section offset out of range: " & $off)
-    if data.continuesWith("xref", off):
-      let trailer = parseClassicSection(data, off, limits, entries)
+    if src.continuesWithAt("xref", off):
+      let trailer = parseClassicSection(src, off, limits, entries)
       if first:
         newestTrailer = trailer
         first = false
@@ -99,13 +100,13 @@ proc parseXRef*(data: string, limits = defaultPdfLimits()): XRef =
       if prev.kind != coInt:
         pdfFail("/Prev must be an integer offset")
       off = prev.ival
-      if off < 0 or off >= data.len:
+      if off < 0 or off >= src.len:
         pdfFail("/Prev offset out of range: " & $off)
     else:
-      let probe = data[off ..< min(data.len, off + 300)]
+      let probe = src.slice(off, min(src.len, off + 300))
       if find(probe, "XRef") >= 0 or find(probe, "obj") >= 0:
-        pdfFail("PDF uses compressed xref streams, which need M2 " &
-          "Flate support (zlib) to read")
+        pdfFail("PDF uses compressed xref streams, which need " &
+          "xref-stream support (a later milestone) to read")
       pdfFail("bad xref section at offset " & $off)
   if newestTrailer.kind != coDict:
     pdfFail("missing PDF trailer dictionary")
@@ -113,6 +114,16 @@ proc parseXRef*(data: string, limits = defaultPdfLimits()): XRef =
   if root.kind != coRef:
     pdfFail("PDF trailer missing /Root reference")
   let size = newestTrailer.dictGet("Size")
+  var idFirst = ""
+  let id = newestTrailer.dictGet("ID")
+  if id.kind == coArray and id.items.len > 0 and
+      id.items[0].kind == coStr:
+    idFirst = id.items[0].sval
   result = XRef(entries: entries, root: root,
-    encrypt: newestTrailer.dictGet("Encrypt"),
+    encrypt: newestTrailer.dictGet("Encrypt"), idFirst: idFirst,
     size: if size.kind == coInt: size.ival else: entries.len)
+
+proc parseXRef*(data: string, limits = defaultPdfLimits()): XRef =
+  ## String convenience wrapper; the parser itself reads from the
+  ## source without copying.
+  parseXRef(fromString(data), limits)

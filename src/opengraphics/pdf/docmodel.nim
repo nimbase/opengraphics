@@ -9,21 +9,60 @@ import ./types
 import ./lexer
 import ./cos
 import ./xref
+import ./crypt
 
 export xref
+export crypt
 
 type
   PdfDoc* = object
-    data*: string
+    data*: PdfSource
     xref*: XRef
     limits*: PdfLimits
     cache*: Table[int, CosObj]
+    crypt*: PdfCrypt
 
-proc openDoc*(data: string, limits = defaultPdfLimits()): PdfDoc =
-  let xr = parseXRef(data, limits)
+proc resolve*(d: var PdfDoc, r: CosObj, depth = 0): CosObj
+proc decryptObj(d: var PdfDoc, num, gen: int, val: CosObj): CosObj
+
+proc openDoc*(src: PdfSource, limits = defaultPdfLimits(),
+    password = ""): PdfDoc =
+  let xr = parseXRef(src, limits)
   limits.checkCount(xr.entries.len, "xref")
-  PdfDoc(data: data, xref: xr, limits: limits,
+  result = PdfDoc(data: src, xref: xr, limits: limits,
     cache: initTable[int, CosObj]())
+  if xr.encrypt.kind == coNull:
+    return
+  var enc = xr.encrypt
+  var encNum = -1
+  if enc.kind == coRef:
+    encNum = enc.refNum
+    enc = result.resolve(enc) # crypt not armed yet: stays plaintext
+  if enc.kind == coDict:
+    let cf = enc.dictGet("CF")
+    if cf.kind == coRef:
+      for i, k in enc.keys:
+        if k == "CF":
+          enc.vals[i] = result.resolve(cf)
+  result.crypt = openCrypt(enc, xr.idFirst, password, encNum)
+
+proc openDoc*(data: string, limits = defaultPdfLimits(),
+    password = ""): PdfDoc =
+  ## String convenience wrapper; the parser views the string without
+  ## copying it.
+  openDoc(fromString(data), limits, password)
+
+proc openMappedDoc*(path: string, limits = defaultPdfLimits(),
+    password = ""): PdfDoc =
+  ## Memory-map `path` and open it. The document borrows the mapping,
+  ## so it stays usable with no heap copy of the file; release it with
+  ## `close` when done. Raises IOError when the file cannot be mapped.
+  openDoc(mapFile(path), limits, password)
+
+proc close*(d: var PdfDoc) =
+  ## Release the underlying file mapping, if any. Using the document
+  ## afterwards raises Defect.
+  d.data.close()
 
 proc cacheSize*(d: PdfDoc): int {.inline.} = d.cache.len
 
@@ -74,14 +113,40 @@ proc resolve*(d: var PdfDoc, r: CosObj, depth = 0): CosObj =
       let raw = parseStreamBody(d.data, after, length)
       let so = CosObj(kind: coStream, streamDict: val.keys,
         streamVals: val.vals, raw: raw)
-      d.cache[r.refNum] = so
-      return so
+      let dec = d.decryptObj(r.refNum, r.refGen, so)
+      d.cache[r.refNum] = dec
+      return dec
     lx.pos = save
   # Non-stream value: re-parse through parseIndirect so endobj and
   # stray-endstream validation apply uniformly.
   let (_, _, obj) = parseIndirect(d.data, e.offset)
-  d.cache[r.refNum] = obj
-  obj
+  let dec = d.decryptObj(r.refNum, r.refGen, obj)
+  d.cache[r.refNum] = dec
+  dec
+
+proc decryptObj(d: var PdfDoc, num, gen: int, val: CosObj): CosObj =
+  ## Decrypt one resolved indirect object (skipped for plain files and
+  ## the /Encrypt dictionary itself). Stream bodies use the stream
+  ## class; stream-dict strings and all other strings use StrF.
+  ## /Metadata streams stay plaintext when EncryptMetadata is false.
+  if not d.crypt.present or num == d.crypt.encryptObjNum:
+    return val
+  if val.kind == coStream:
+    var isMeta = false
+    for i, k in val.streamDict:
+      if k == "Type" and val.streamVals[i].kind == coName and
+          val.streamVals[i].name == "Metadata":
+        isMeta = true
+    var dict = newSeq[CosObj](val.streamVals.len)
+    for i, v in val.streamVals:
+      dict[i] = d.crypt.decryptValue(v, num, gen, d.crypt.strCrypt)
+    if isMeta and not d.crypt.encryptMetadata:
+      return CosObj(kind: coStream, streamDict: val.streamDict,
+        streamVals: dict, raw: val.raw)
+    return CosObj(kind: coStream, streamDict: val.streamDict,
+      streamVals: dict,
+      raw: d.crypt.decryptData(num, gen, val.raw, d.crypt.stmCrypt))
+  d.crypt.decryptValue(val, num, gen, d.crypt.strCrypt)
 
 proc catalog*(d: var PdfDoc): CosObj =
   let c = d.resolve(d.xref.root)

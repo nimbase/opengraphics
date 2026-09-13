@@ -53,20 +53,20 @@ test "non-pdf input rejected":
   expect(PdfError):
     discard readPdfBytes("")
 
-test "encrypted file names M4":
+test "dangling encrypt reference fails":
   let data = assemblePdf(@["<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
     pageObj(2, 10.0, 10.0)],
     extraTrailer = "/Encrypt 4 0 R") &
-    "" # trailer references missing object; encrypt check fires first
+    "" # trailer references missing object; resolve names it
   var msg = ""
   try:
     discard readPdfBytes(data)
   except PdfError as e:
     msg = e.msg
-  check "M4" in msg
+  check "dangling reference" in msg
 
-test "xref stream names M2":
+test "xref stream names the missing piece":
   var data = "%PDF-1.7\n"
   let xoff = data.len
   data.add("5 0 obj\n<< /Type /XRef /Size 6 /Root 1 0 R >>\n" &
@@ -77,7 +77,7 @@ test "xref stream names M2":
     discard readPdfBytes(data)
   except PdfError as e:
     msg = e.msg
-  check "M2" in msg
+  check "xref-stream" in msg
 
 test "dangling reference rejected":
   let data = assemblePdf(@["<< /Type /Catalog /Pages 2 0 R >>",

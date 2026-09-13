@@ -1,18 +1,25 @@
 ## Byte-level lexer cursor shared by the COS and xref parsers.
 ##
-## Operates on the raw file held as a string. All scanning is bounded
-## by the input length; structural caps live in PdfLimits.
+## Operates on a PdfSource, which is either a zero-copy view of a
+## string or a memory-mapped file. All scanning is bounded by the
+## input length; structural caps live in PdfLimits.
 
 import std/strutils
 import ./types
+import ./source
+
+export source
 
 type
   Lexer* = object
-    s*: string
+    s*: PdfSource
     pos*: int
 
 proc initLexer*(s: string, pos = 0): Lexer =
-  Lexer(s: s, pos: pos)
+  Lexer(s: fromString(s), pos: pos)
+
+proc initLexer*(src: PdfSource, pos = 0): Lexer =
+  Lexer(s: src, pos: pos)
 
 proc pdfFail*(msg: string) {.noreturn.} =
   raise newException(PdfError, msg)
@@ -40,7 +47,7 @@ proc atEnd*(lx: Lexer): bool {.inline.} =
   lx.pos >= lx.s.len
 
 proc continuesWith*(lx: Lexer, kw: string): bool =
-  lx.s.continuesWith(kw, lx.pos)
+  lx.s.continuesWithAt(kw, lx.pos)
 
 proc expectKeyword*(lx: var Lexer, kw: string, what: string) =
   ## Consume kw; the next byte must be a delimiter or end of input.
@@ -61,7 +68,7 @@ proc readTableInt*(lx: var Lexer, what: string): int =
   if start == lx.pos:
     pdfFail("expected integer for " & what & " at offset " & $start)
   try:
-    parseInt(lx.s[start ..< lx.pos])
+    parseInt(lx.s.slice(start, lx.pos))
   except ValueError:
     pdfFail("bad integer for " & what & " at offset " & $start)
 
