@@ -54,15 +54,15 @@ proc openPdf*(path: string, limits = defaultPdfLimits(),
   PdfDocument(version: parsePdfVersion(head), pages: boxes,
     hasEncrypt: doc.crypt.present)
 
-proc pdfNeedsPassword*(data: string,
+proc openPdfPassword*(data: string,
     limits = defaultPdfLimits()): bool =
   ## True when the newest trailer carries /Encrypt. Says nothing about
   ## whether the empty password suffices.
   parseXRef(data, limits).encrypt.kind != coNull
 
-proc pdfNeedsPasswordFile*(path: string,
+proc openPdfPasswordFile*(path: string,
     limits = defaultPdfLimits()): bool =
-  ## `pdfNeedsPassword` for a file on disk, via mmap.
+  ## `openPdfPassword` for a file on disk, via mmap.
   var src = fromFile(path)
   defer: src.close()
   parseXRef(src, limits).encrypt.kind != coNull
