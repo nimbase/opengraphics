@@ -71,7 +71,7 @@ proc openShapedFont*(fontBytes: string): ShapedFont =
     pdfFail("font program has no glyphs (Adobe Type 1 programs are " &
       "not supported by HarfBuzz; embed TrueType or OpenType)")
 
-proc shapeInto(sf: ShapedFont, text: string, run: var ShapedRun) =
+proc shapeInto*(sf: ShapedFont, text: string, run: var ShapedRun) =
   let buf = hb_buffer_create()
   hb_buffer_add_utf8(buf, cstring(text), cint(text.len), 0,
     cint(text.len))
