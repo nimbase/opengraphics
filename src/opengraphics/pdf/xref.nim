@@ -23,9 +23,10 @@ type
     root*: CosObj ## /Root reference from the newest trailer
     encrypt*: CosObj ## /Encrypt (coNull when absent)
     idFirst*: string ## first /ID string ("" when absent; never encrypted)
+    idSecond*: string ## second /ID string ("" when absent)
     size*: int ## /Size from the newest trailer
 
-proc parseStartxref(data: PdfSource, limits: PdfLimits): int =
+proc parseStartxref*(data: PdfSource, limits: PdfLimits): int =
   let tail = data.slice(max(0, data.len - limits.maxScanBytes), data.len)
   let sx = rfind(tail, "startxref")
   if sx < 0:
@@ -115,12 +116,17 @@ proc parseXRef*(src: PdfSource, limits = defaultPdfLimits()): XRef =
     pdfFail("PDF trailer missing /Root reference")
   let size = newestTrailer.dictGet("Size")
   var idFirst = ""
+  var idSecond = ""
   let id = newestTrailer.dictGet("ID")
   if id.kind == coArray and id.items.len > 0 and
       id.items[0].kind == coStr:
     idFirst = id.items[0].sval
+  if id.kind == coArray and id.items.len > 1 and
+      id.items[1].kind == coStr:
+    idSecond = id.items[1].sval
   result = XRef(entries: entries, root: root,
     encrypt: newestTrailer.dictGet("Encrypt"), idFirst: idFirst,
+    idSecond: idSecond,
     size: if size.kind == coInt: size.ival else: entries.len)
 
 proc parseXRef*(data: string, limits = defaultPdfLimits()): XRef =
