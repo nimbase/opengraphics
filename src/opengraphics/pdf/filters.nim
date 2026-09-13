@@ -329,7 +329,7 @@ proc runLengthDecode*(data: string): string =
 # Dispatcher
 # ---------------------------------------------------------------------------
 
-proc canonFilterName(n: string): string =
+proc canonFilterName*(n: string): string =
   ## Accept abbreviated filter names (§7.4.1 Table 5).
   case n
   of "Fl": "FlateDecode"
@@ -342,7 +342,7 @@ proc canonFilterName(n: string): string =
   of "DCT": "DCTDecode"
   else: n
 
-proc isPassthrough(name: string): bool =
+proc isPassthrough*(name: string): bool =
   ## Image filters pass bytes through in M2; decoding them is M5 work.
   name in ["DCTDecode", "JPXDecode", "JBIG2Decode", "CCITTFaxDecode"]
 

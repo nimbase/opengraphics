@@ -16,6 +16,10 @@ import pdf/text
 import pdf/images
 import pdf/vipsimg
 import pdf/document
+import pdf/write
+import pdf/fontembed
+import pdf/doctext
+import pdf/sheet
 import exporting
 
 export types
@@ -34,4 +38,8 @@ export text
 export images
 export vipsimg
 export document
+export write
+export fontembed
+export doctext
+export sheet
 export exporting

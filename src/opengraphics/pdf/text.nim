@@ -39,6 +39,7 @@ type
     y*: float64
     size*: float64
     fontName*: string
+    w*: float64 ## device-space advance width (for gap-aware joining)
 
 proc decodeCode(fd: FontDecoder, code: int): string =
   if fd.hasCMap and fd.cmap.entries.hasKey(code):
@@ -186,17 +187,25 @@ proc showText(d: var PdfDoc, gs: var GState, fd: FontDecoder,
   var text = ""
   for code in splitCodes(s, fd.codeLen):
     text.add(fd.decodeCode(code))
-  runs.add(TextRun(text: text, x: trm[4], y: trm[5], size: fs,
-    fontName: fd.fontName))
+  # Total text-space advance, mapped to device x by the rendering
+  # matrix scale. Exact for unrotated text; an approximation under
+  # rotation, which only affects space-vs-kern joining downstream.
+  var advText = 0.0
   for code in splitCodes(s, fd.codeLen):
     let decoded = fd.decodeCode(code)
     var tx = (fd.codeWidth(code) * fs / 1000.0 + gs.text.charSpace) * th
     if decoded == " ":
       tx += gs.text.wordSpace * th
+    advText += tx
     let t: Matrix = [1.0, 0.0, 0.0, 1.0, tx, 0.0]
     # Showing text advances Tm only; Tlm keeps the line start for
     # Td, TD and T*.
     gs.textMatrix = concatMatrix(t, gs.textMatrix)
+  var w = 0.0
+  if fs != 0.0 and th != 0.0:
+    w = advText * abs(trm[0]) / (fs * th)
+  runs.add(TextRun(text: text, x: trm[4], y: trm[5], size: fs,
+    fontName: fd.fontName, w: w))
 
 proc decoderFor(d: var PdfDoc, res: CosObj,
     cache: var Table[string, FontDecoder], gs: GState): FontDecoder =
