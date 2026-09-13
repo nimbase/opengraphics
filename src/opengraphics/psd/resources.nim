@@ -116,6 +116,32 @@ proc getThumbnail*(res: ImageResources): Option[Thumbnail] =
     return none(Thumbnail)
   some(parseThumbnail(res.blocks[idx].data))
 
+proc hasThumbnail*(res: ImageResources): bool =
+  ## True when a usable thumbnail payload is present (1036 RGB,
+  ## else 1033 BGR). False when absent or skipped via
+  ## ReadOptions.skipThumbnail (payload cleared at read time).
+  getThumbnail(res).isSome
+
+proc saveThumbnailJpeg*(t: Thumbnail, path: string) =
+  ## Write the embedded JFIF payload verbatim to a .jpg file.
+  ## Opens in macOS Preview with no decoding step. Raises PsdError
+  ## when the payload is empty.
+  if t.jpeg.len == 0:
+    raise newException(PsdError, "cannot write thumbnail: empty JPEG payload")
+  var f = open(path, fmWrite)
+  defer: close(f)
+  var payload = t.jpeg
+  discard f.writeBuffer(addr payload[0], payload.len)
+
+proc saveThumbnailJpeg*(res: ImageResources, path: string) =
+  ## Convenience overload: uses the file's own thumbnail (same
+  ## 1036-then-1033 preference as getThumbnail). Raises PsdError
+  ## when the file carries no thumbnail.
+  let t = res.getThumbnail()
+  if t.isNone:
+    raise newException(PsdError, "cannot write thumbnail: file has none")
+  saveThumbnailJpeg(t.get, path)
+
 proc iccProfile*(res: ImageResources): seq[byte] =
   ## Raw ICC profile bytes (ID 1039, else 1040), or empty if absent.
   ## The first 4 bytes (big-endian) give the profile size and
