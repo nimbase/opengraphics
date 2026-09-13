@@ -14,6 +14,7 @@ type
     maxObjects*: int ## xref entries + registry cache size
     maxWalkDepth*: int ## page-tree nesting depth
     maxContentOps*: int ## operators per content stream
+    maxImagePixels*: int ## width * height per image
 
   PageBox* = object
     index*: int
@@ -22,7 +23,7 @@ type
 
 proc defaultPdfLimits*(): PdfLimits =
   PdfLimits(maxPages: 1000, maxScanBytes: 8192, maxObjects: 200000,
-    maxWalkDepth: 32, maxContentOps: 100000)
+    maxWalkDepth: 32, maxContentOps: 100000, maxImagePixels: 100000000)
 
 proc checkCount*(limits: PdfLimits, n: int, what: string) =
   if n < 0:

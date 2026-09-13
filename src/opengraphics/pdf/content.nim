@@ -29,7 +29,7 @@ proc scanName(lx: var Lexer): string =
     if lx.s[lx.pos] == '#' and lx.pos + 2 < lx.s.len and
         lx.s[lx.pos + 1] in HexDigits and lx.s[lx.pos + 2] in HexDigits:
       try:
-        result.add(chr(parseHexInt(lx.s[lx.pos + 1 .. lx.pos + 2])))
+        result.add(chr(parseHexInt(lx.s.slice(lx.pos + 1, lx.pos + 3))))
       except ValueError:
         pdfFail("bad # escape in inline image key")
       lx.pos += 3
@@ -84,7 +84,7 @@ proc parseInlineImage(lx: var Lexer, limits: PdfLimits): ContentOp =
     pdfFail("unterminated inline image data")
   lx.pos = dataEnd + 3
   let dict = CosObj(kind: coDict, keys: keys, vals: vals)
-  let bytes = CosObj(kind: coStr, sval: lx.s[dataStart ..< dataEnd])
+  let bytes = CosObj(kind: coStr, sval: lx.s.slice(dataStart, dataEnd))
   ContentOp(name: "BI", operands: @[dict, bytes])
 
 proc parseContentStream*(data: string,

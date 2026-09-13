@@ -72,7 +72,7 @@ test "parseIndirect rejects indirect length without doc":
   let off = doc.xref.entries[3].offset
   var msg = ""
   try:
-    discard parseIndirect(data, off)
+    discard parseIndirect(fromString(data), off)
   except PdfError as e:
     msg = e.msg
   check "document context" in msg
