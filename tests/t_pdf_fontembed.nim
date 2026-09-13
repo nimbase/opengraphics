@@ -4,6 +4,19 @@
 ## checkout when present; otherwise our own m3b_text.pdf fixture
 ## (embedded subset holding only A, B, C) covers the same paths with
 ## ABC-only text.
+##
+## CID micro-fonts under tests/data/fonts (self-contained, no system
+## fonts): cjk-cff-micro.otf is 6 glyphs (A, X, あ, 日, 本, 語)
+## subset from NotoSansJP-Regular.otf (OFL 1.1,
+## https://github.com/googlefonts/noto-cjk/raw/main/Sans/SubsetOTF/JP/NotoSansJP-Regular.otf,
+## CFF outlines) via
+## `hb-subset NotoSansJP-Regular.otf
+## --unicodes=U+0041,U+0058,U+3042,U+65E5,U+672C,U+8A9E`;
+## emoji-cbdt-micro.ttf is 2 glyphs (U+1F600, U+1F389) subset from
+## NotoColorEmoji.ttf (OFL 1.1,
+## https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf,
+## CBDT bitmaps) via `hb-subset NotoColorEmoji.ttf
+## --unicodes=U+1F600,U+1F389`. Both with hb-subset 14.2.1 defaults.
 import std/os
 import std/strutils
 import std/tables
@@ -149,3 +162,149 @@ test "embedFont rejects empty codes":
 test "subsetFont rejects empty program":
   expect(PdfError):
     discard subsetFont("", runesOf("Hi"))
+
+# ---------------------------------------------------------------------------
+# CID-keyed Type0 path (CidFontUse): full Unicode, shaped emission
+# ---------------------------------------------------------------------------
+
+const
+  CjkMicro = "tests/data/fonts/cjk-cff-micro.otf"
+  EmojiMicro = "tests/data/fonts/emoji-cbdt-micro.ttf"
+
+proc cidDemoBytes(prog, name, text: string): tuple[pdf, content: string] =
+  var sf = openShapedFont(prog)
+  defer: close(sf)
+  var use = CidFontUse(fontBytes: prog, baseName: name)
+  let content = drawCidLine(use, sf, 72.0, 720.0, "F9", 24.0, text)
+  var b = newPdfBuilder()
+  let fonts = b.finalizeFonts({"F9": use}.toTable)
+  let cnum = b.addContentStream(content)
+  discard b.addPage(612.0, 792.0, cnum, fontResources(fonts))
+  (b.buildPdf(), content)
+
+proc cidTexts(pdf: string): seq[string] =
+  ## Extraction yields one run per TJ segment (kern splits), so the
+  ## line text is the concatenation of its runs.
+  var d = openDoc(pdf)
+  var line = ""
+  for r in d.extractText(0):
+    line.add(r.text)
+  @[line]
+
+test "cid mixed scripts round-trip":
+  if not fileExists(DejaVuPath):
+    echo "no sibling harfbuzz checkout; cid scripts skipped"
+  else:
+    let t = "αβγ Жж →☺"
+    check cidTexts(cidDemoBytes(readFile(DejaVuPath), "DejaVuSans",
+      t).pdf) == @[t]
+
+test "cid ligature maps to two runes":
+  if not fileExists(DejaVuPath):
+    echo "no sibling harfbuzz checkout; cid ligature skipped"
+  else:
+    check cidTexts(cidDemoBytes(readFile(DejaVuPath), "DejaVuSans",
+      "fi").pdf) == @["fi"]
+
+test "cid astral emoji round-trips":
+  if not fileExists(DejaVuPath):
+    echo "no sibling harfbuzz checkout; cid astral skipped"
+  else:
+    let t = "😀"
+    check cidTexts(cidDemoBytes(readFile(DejaVuPath), "DejaVuSans",
+      t).pdf) == @[t]
+
+test "cid kern emits TJ and still round-trips":
+  if not fileExists(DejaVuPath):
+    echo "no sibling harfbuzz checkout; cid kern skipped"
+  else:
+    let (pdf, content) = cidDemoBytes(readFile(DejaVuPath),
+      "DejaVuSans", "AV")
+    check " TJ" in content # A kerns -131 under V in DejaVu
+    check cidTexts(pdf) == @["AV"]
+
+test "cid cjk micro font round-trips":
+  let t = "日本語あAX"
+  check cidTexts(cidDemoBytes(readFile(CjkMicro), "NotoSansJP",
+    t).pdf) == @[t]
+
+test "cid cbdt emoji round-trips":
+  let t = "😀🎉"
+  check cidTexts(cidDemoBytes(readFile(EmojiMicro), "NotoEmoji",
+    t).pdf) == @[t]
+
+test "cid structures pin correctly":
+  let (pdf, _) = cidDemoBytes(readFile(CjkMicro), "NotoSansJP",
+    "日本語")
+  var d = openDoc(pdf)
+  var fonts = d.pageResources(0).dictGet("Font")
+  if fonts.kind == coRef:
+    fonts = d.resolve(fonts)
+  var font = fonts.dictGet("F9")
+  if font.kind == coRef:
+    font = d.resolve(font)
+  check font.dictGet("Subtype").name == "Type0"
+  check font.dictGet("Encoding").name == "Identity-H"
+  var cid = font.dictGet("DescendantFonts").items[0]
+  if cid.kind == coRef:
+    cid = d.resolve(cid)
+  check cid.dictGet("Subtype").name == "CIDFontType0" # CFF outlines
+  check cid.dictGet("DW").kind == coInt
+  let w = cid.dictGet("W")
+  check w.kind == coArray
+  check w.items.len mod 2 == 0
+  var map = cid.dictGet("CIDToGIDMap")
+  if map.kind == coRef:
+    map = d.resolve(map)
+  check map.kind == coStream
+  check font.dictGet("ToUnicode").kind == coRef
+
+test "cid ttf descendant is CIDFontType2":
+  if not fileExists(DejaVuPath):
+    echo "no sibling harfbuzz checkout; cid type2 skipped"
+  else:
+    let (pdf, _) = cidDemoBytes(readFile(DejaVuPath), "DejaVuSans",
+      "αβ")
+    var d = openDoc(pdf)
+    var fonts = d.pageResources(0).dictGet("Font")
+    if fonts.kind == coRef:
+      fonts = d.resolve(fonts)
+    var font = fonts.dictGet("F9")
+    if font.kind == coRef:
+      font = d.resolve(font)
+    var cid = font.dictGet("DescendantFonts").items[0]
+    if cid.kind == coRef:
+      cid = d.resolve(cid)
+    check cid.dictGet("Subtype").name == "CIDFontType2"
+
+test "cid missing glyph fails loudly":
+  if not fileExists(DejaVuPath):
+    echo "no sibling harfbuzz checkout; cid missing skipped"
+  else:
+    var sf = openShapedFont(readFile(DejaVuPath))
+    defer: close(sf)
+    var use = CidFontUse(fontBytes: readFile(DejaVuPath),
+      baseName: "DejaVuSans")
+    expect(PdfError):
+      discard drawCidLine(use, sf, 72.0, 720.0, "F9", 24.0, "日本")
+
+test "cid subset stays tiny":
+  if not fileExists(DejaVuPath):
+    echo "no sibling harfbuzz checkout; cid tiny skipped"
+  else:
+    let full = readFile(DejaVuPath)
+    check full.len > 500_000
+    let sub = subsetFont(full, runesOf("αβγ Ж"))
+    check sub.len > 0
+    check sub.len < 50_000
+
+test "cid finalize is deterministic":
+  let a = cidDemoBytes(readFile(CjkMicro), "NotoSansJP", "日本語")
+  let b = cidDemoBytes(readFile(CjkMicro), "NotoSansJP", "日本語")
+  check a.pdf == b.pdf
+
+test "embedCidFont rejects empty use":
+  var b = newPdfBuilder()
+  expect(PdfError):
+    discard b.embedCidFont("NotoSansJP", readFile(CjkMicro),
+      initTable[uint32, int](), initTable[int, string]())
