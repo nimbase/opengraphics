@@ -1,14 +1,17 @@
 ## Document-level text: pages, lines, blocks, exact search.
 ##
 ## `extractText` yields one run per shown string in content order.
-## This module groups runs into lines (shared baseline), lines into
-## blocks (small vertical gap plus matching indent), and searches the
-## result with plain substring matching from the stdlib.
+## This module groups runs into lines (shared baseline, or shared
+## column for vertical WMode 1 runs), lines into blocks (small gaps
+## plus matching indent; vertical columns join right to left), and
+## searches the result with plain substring matching from the stdlib.
 ##
 ## Deliberate limits: content order is kept (no column reordering),
 ## block boxes span run origins (not ink extents), and case folding is
 ## ASCII only. Two-column pages may merge same-baseline runs into one
-## line; centered or hanging-indented lines may split blocks.
+## line; centered or hanging-indented lines may split blocks. Sheet
+## tables read horizontal lines only; vertical tables extract as
+## column lines but are not detected as tables.
 
 import std/algorithm
 import std/strutils
@@ -89,40 +92,70 @@ proc joinRuns*(runs: seq[TextRun],
 
 proc groupLines*(runs: seq[TextRun], lineTol = 0.5,
     wordTol = 0.15): seq[TextLine] =
-  ## Runs sharing a baseline become one x-sorted line. A run joins
-  ## the open line while |dy| stays within lineTol times the larger
-  ## font size.
+  ## Runs sharing a baseline become one x-sorted line. Vertical runs
+  ## sharing a column band become one y-descending line (reading order
+  ## top to bottom); their text concatenates directly. A run joins
+  ## the open line while the cross-axis distance stays within lineTol
+  ## times the larger font size.
   result = @[]
   for r in runs:
     if result.len > 0:
       let line = addr result[^1]
-      if abs(r.y - line.y) <= lineTol * max(r.size, line.size):
-        line.runs.add(r)
-        line.size = max(line.size, r.size)
-        continue
+      let sameKind =
+        (line.runs[0].vert and r.vert) or
+        (not line.runs[0].vert and not r.vert)
+      if sameKind:
+        let d =
+          if r.vert: abs(r.x - line.x)
+          else: abs(r.y - line.y)
+        if d <= lineTol * max(r.size, line.size):
+          line.runs.add(r)
+          line.size = max(line.size, r.size)
+          continue
     result.add(TextLine(text: "", x: r.x, y: r.y, size: r.size,
       runs: @[r], idx: result.len))
   for line in result.mitems:
-    line.runs.sort(proc(a, b: TextRun): int = cmp(a.x, b.x))
-    line.x = line.runs[0].x
-    line.y = line.runs[0].y
-    let joined = joinRuns(line.runs, wordTol)
-    line.text = joined.text
-    line.starts = joined.starts
+    if line.runs[0].vert:
+      line.runs.sort(proc(a, b: TextRun): int = cmp(b.y, a.y))
+      line.x = line.runs[0].x
+      line.y = line.runs[0].y
+      line.text = ""
+      line.starts = @[]
+      for r in line.runs:
+        line.starts.add(line.text.len)
+        line.text.add(r.text)
+    else:
+      line.runs.sort(proc(a, b: TextRun): int = cmp(a.x, b.x))
+      line.x = line.runs[0].x
+      line.y = line.runs[0].y
+      let joined = joinRuns(line.runs, wordTol)
+      line.text = joined.text
+      line.starts = joined.starts
 
 proc groupBlocks*(lines: seq[TextLine], blockGap = 1.5): seq[TextBlock] =
-  ## Consecutive lines become one block while the vertical gap stays
-  ## within blockGap times the previous size and the indent matches
-  ## within twice that size.
+  ## Consecutive lines become one block while the gap stays within
+  ## blockGap times the previous size and the indent matches within
+  ## twice that size. Vertical lines advance right to left: they join
+  ## while the column step left stays within the gap and the tops
+  ## align. Mixed orientations always split.
   result = @[]
   for line in lines:
     if result.len > 0:
       let blk = addr result[^1]
       let prev = blk.lines[^1]
-      if abs(prev.y - line.y) <= blockGap * prev.size and
-          abs(line.x - prev.x) <= 2.0 * prev.size:
-        blk.lines.add(line)
-        continue
+      let pv = prev.runs[0].vert
+      let lv = line.runs[0].vert
+      if pv and lv:
+        if prev.x - line.x >= 0.0 and
+            prev.x - line.x <= blockGap * prev.size and
+            abs(line.y - prev.y) <= 2.0 * prev.size:
+          blk.lines.add(line)
+          continue
+      elif not pv and not lv:
+        if abs(prev.y - line.y) <= blockGap * prev.size and
+            abs(line.x - prev.x) <= 2.0 * prev.size:
+          blk.lines.add(line)
+          continue
     result.add(TextBlock(text: "", x: line.x, y: line.y, w: 0.0, h: 0.0,
       lines: @[line]))
   for blk in result.mitems:

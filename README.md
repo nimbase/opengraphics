@@ -199,6 +199,12 @@ for h in doc.searchText("Lorem"):
   echo "p", h.page, " line ", h.line, " col ", h.col, ": ", h.excerpt
 d.close()
 
+# CJK needs no flags: Identity-H fonts without ToUnicode resolve
+# through built-in ordering tables (Japan1/GB1/CNS1/Korea1),
+# predefined encodings, or the embedded font itself. Vertical
+# (WMode 1) text groups into columns. Unmapped codes stay U+FFFD,
+# never guesses.
+
 # Fuzzy search is caller-side (openparser), not an opengraphics dep.
 import openparser/fuzzy
 var lines: seq[string] = @[]

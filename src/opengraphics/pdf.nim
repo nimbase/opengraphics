@@ -11,6 +11,9 @@ import pdf/content
 import pdf/gstate
 import pdf/crypt
 import pdf/cmap
+import pdf/cjkdata
+import pdf/cjkmaps
+import pdf/sfntcmap
 import pdf/shape
 import pdf/text
 import pdf/images
@@ -33,6 +36,9 @@ export content
 export gstate
 export crypt
 export cmap
+export cjkdata
+export cjkmaps
+export sfntcmap
 export shape
 export text
 export images

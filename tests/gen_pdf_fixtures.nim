@@ -362,8 +362,88 @@ proc writeText() =
   ]
   writeFile(OutDir / "m3b_text.pdf", assemblePdf(objs))
 
-# --- M5 image fixtures: Flate RGB/gray+SMask/Indexed, JPEG, CMYK,
-# stencil mask, color-key mask. JPEG bytes come from libvips itself.
+# --- M8 CJK fixtures: Type0 fonts decoded without full ToUnicode.
+#
+# Page 0: Identity-H with no ToUnicode over Adobe-Japan1, so codes are
+# Japan1 CIDs resolved through the vendored ROS tables (日あA).
+# Page 1: same setup with /WMode 1 plus DW2/W2, two column fragments.
+# Page 2: predefined 90ms-RKSJ-H with no ToUnicode (mixed 1/2-byte
+# codes, CID path plus direct UCS2 gap-fill).
+# Page 3: Identity-H with a layout-hostile ToUnicode (multi-pair line
+# plus an entry split across lines).
+# Page 4: CIDFontType2 with Identity ordering, no ToUnicode: the
+# embedded minimal sfnt cmap maps GID 1 back to U+0041.
+
+proc writeCjk() =
+  let sfnt = "\x00\x01\x00\x00\x00\x01\x00\x10\x00\x00\x00\x00" &
+    "cmap\x00\x00\x00\x00\x00\x00\x00\x1C\x00\x00\x00\x2C" &
+    "\x00\x00\x00\x01\x00\x03\x00\x01\x00\x00\x00\x0C" &
+    "\x00\x04\x00\x20\x00\x00\x00\x04\x00\x04\x00\x01\x00\x00" &
+    "\x00\x41\xFF\xFF\x00\x00\x00\x41\xFF\xFF" &
+    "\xFF\xC0\x00\x01\x00\x00\x00\x00"
+  doAssert sfnt.len == 72, "minimal sfnt length " & $sfnt.len
+  let touPack = "3 beginbfchar <0001> <0041> <0002> <0042> <0003>\n" &
+    "<0043> endbfchar\n"
+  let c0 = "BT /F1 24 Tf 72 700 Td <0CD4034B0022> Tj ET"
+  let c1 = "BT /F2 12 Tf 400 700 Td <0CD4> Tj ET\n" &
+    "BT /F2 12 Tf 388 700 Td <034B> Tj ET"
+  let c2 = "BT /F3 24 Tf 72 700 Td <4193FA> Tj ET"
+  let c3 = "BT /F4 24 Tf 72 700 Td <000100020003> Tj ET"
+  let c4 = "BT /F5 24 Tf 72 700 Td <0001> Tj ET"
+  let objs = @[
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R 7 0 R] /Count 5 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " &
+      "/Resources << /Font << /F1 8 0 R >> >> /Contents 9 0 R >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " &
+      "/Resources << /Font << /F2 10 0 R >> >> /Contents 11 0 R >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " &
+      "/Resources << /Font << /F3 12 0 R >> >> /Contents 13 0 R >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " &
+      "/Resources << /Font << /F4 14 0 R >> >> /Contents 16 0 R >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " &
+      "/Resources << /Font << /F5 17 0 R >> >> /Contents 18 0 R >>",
+    "<< /Type /Font /Subtype /Type0 /BaseFont /TestCJK-JP " &
+      "/Encoding /Identity-H /DescendantFonts 26 0 R >>",
+    streamObj("", c0),
+    "<< /Type /Font /Subtype /Type0 /BaseFont /TestCJK-V " &
+      "/Encoding /Identity-H /WMode 1 /DescendantFonts [21 0 R] >>",
+    streamObj("", c1),
+    "<< /Type /Font /Subtype /Type0 /BaseFont /TestCJK-RKSJ " &
+      "/Encoding /90ms-RKSJ-H /DescendantFonts [22 0 R] >>",
+    streamObj("", c2),
+    "<< /Type /Font /Subtype /Type0 /BaseFont /TestCJK-ToU " &
+      "/Encoding /Identity-H /DescendantFonts [23 0 R] " &
+      "/ToUnicode 15 0 R >>",
+    streamObj("", touPack),
+    streamObj("", c3),
+    "<< /Type /Font /Subtype /Type0 /BaseFont /TestCJK-Sfnt " &
+      "/Encoding /Identity-H /DescendantFonts [24 0 R] >>",
+    streamObj("", c4),
+    streamObj("/Length1 72 /Subtype /TrueType", sfnt),
+    "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /TestCJK-JP " &
+      "/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) " &
+      "/Supplement 4 >> /DW 1000 " &
+      "/W [34 34 1000 843 843 1000 3284 3284 1000] >>",
+    "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /TestCJK-V " &
+      "/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) " &
+      "/Supplement 4 >> /DW 1000 /DW2 [880 -1000] " &
+      "/W2 [34 34 -1000 500 880] >>",
+    "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /TestCJK-RKSJ " &
+      "/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) " &
+      "/Supplement 4 >> /DW 1000 >>",
+    "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /TestCJK-ToU " &
+      "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) " &
+      "/Supplement 0 >> /DW 1000 >>",
+    "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /TestCJK-Sfnt " &
+      "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) " &
+      "/Supplement 0 >> /DW 1000 /W [1 1 1000] " &
+      "/FontDescriptor 25 0 R >>",
+    "<< /Type /FontDescriptor /FontName /TestCJK-Sfnt /Flags 4 " &
+      "/FontBBox [0 0 1000 1000] /FontFile2 19 0 R >>",
+    "[20 0 R]",
+  ]
+  writeFile(OutDir / "m8_cjk.pdf", assemblePdf(objs))
 
 proc jpegBytes(w, h: int, rgb: array[3, uint8]): string =
   init_vips:
@@ -436,6 +516,7 @@ writeAes()
 writeR6()
 writeText()
 writeImages()
+writeCjk()
 sanity(OutDir / "m3a_basic.pdf", 2, 8)
 sanity(OutDir / "m3a_update.pdf", 1, 3)
 sanity(OutDir / "m4_rc4.pdf", 1, 3, "user123")
@@ -443,3 +524,4 @@ sanity(OutDir / "m4_aes.pdf", 1, 3, "user123")
 sanity(OutDir / "m4_r6.pdf", 1, 3, "user456")
 sanity(OutDir / "m3b_text.pdf", 2, 16)
 sanity(OutDir / "m5_images.pdf", 1, 7)
+sanity(OutDir / "m8_cjk.pdf", 5, 10)

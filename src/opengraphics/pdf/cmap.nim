@@ -1,9 +1,12 @@
 ## Character maps and encodings (ISO 32000 §9.7, §9.6.6, Annex D).
 ##
 ## Byte tables for WinAnsi and MacRoman generated from Python's
-## authoritative codecs (undefined entries are -1). ToUnicode CMaps
-## parse bfchar/bfrange sections; destinations decode as UTF-16BE with
-## surrogate support, so ligatures mapping to several scalars work.
+## authoritative codecs (undefined entries are -1). parseCMap reads a
+## whole CMap stream as tokens, so multi-pair lines and entries split
+## across lines parse identically; it understands bfchar/bfrange with
+## single and array destinations (destinations decode as UTF-16BE with
+## surrogate support, so ligatures mapping to several scalars work),
+## cidchar/cidrange (code to CID), and codespace ranges.
 ## Glyph names resolve through a small common table plus uniXXXX and
 ## uXXXXXX patterns; anything else is unmapped (-1) rather than a
 ## guess, since a wrong character is worse than U+FFFD.
@@ -52,9 +55,17 @@ const macRomanTable*: array[256, int] = [
 ]
 
 type
+  CodeRange* = object
+    lo*: int ## codespace range, inclusive, as big-endian integers
+    hi*: int
+    len*: int ## code length in bytes (all codes in a range share it)
+
   CMap* = object
     entries*: Table[int, string] ## source code -> UTF-8 text
     maxKeyLen*: int ## longest source code in bytes (1..4)
+    codes*: seq[CodeRange] ## codespace ranges from begincodespacerange
+    cids*: Table[int, int] ## source code -> CID from cidchar/cidrange
+    hasCids*: bool
 
 proc hexVal(c: char): int =
   case c
@@ -108,110 +119,263 @@ proc codeInt(b: seq[byte]): int =
   for x in b:
     result = result * 256 + int(x)
 
-proc splitTokens(line: string): seq[string] =
-  ## Split a CMap content line into <hex>, [arrays] and bare words.
+type
+  CMapTokKind = enum
+    tkHex, tkLBrack, tkRBrack, tkWord
+  CMapTok = object
+    case kind*: CMapTokKind
+    of tkHex, tkWord:
+      text*: string ## hex digits without brackets, or bare word
+    else:
+      discard
+
+proc tokenizeCMap(data: string): seq[CMapTok] =
+  ## Whole-stream tokenization: <hex>, brackets and bare words.
+  ## Comments (%) run to end of line. Multi-pair lines and entries
+  ## split across lines tokenize identically, so layout never matters.
   var i = 0
-  while i < line.len:
-    if line[i] in {' ', '\x09', '\x0A', '\x0C', '\x0D'}:
+  while i < data.len:
+    let c = data[i]
+    if c in {' ', '\x09', '\x0A', '\x0C', '\x0D', '\x00'}:
       inc i
-    elif line[i] == '<':
-      var t = "<"
-      inc i
-      while i < line.len and line[i] != '>':
-        t.add(line[i])
+    elif c == '%':
+      while i < data.len and data[i] != '\x0A':
         inc i
-      if i < line.len:
-        t.add('>')
-        inc i
-      result.add(t)
-    elif line[i] == '[':
-      var t = "["
+    elif c == '<':
+      if i + 1 < data.len and data[i + 1] == '<':
+        result.add(CMapTok(kind: tkWord, text: "<<"))
+        i += 2
+        continue
+      var t = ""
       inc i
-      while i < line.len and line[i] != ']':
-        if line[i] == '<':
-          t.add('<')
+      while i < data.len and data[i] != '>':
+        if data[i] notin {' ', '\x09', '\x0A', '\x0C', '\x0D'}:
+          t.add(data[i])
+        inc i
+      if i < data.len:
+        inc i
+      result.add(CMapTok(kind: tkHex, text: t))
+    elif c == '>':
+      # Stray closer (real ones are consumed by the '<' arm,
+      # dict '>>' skips as two strays).
+      inc i
+    elif c == '(':
+      var depth = 1
+      inc i
+      while i < data.len and depth > 0:
+        if data[i] == '\\':
+          i += 2
+        elif data[i] == '(':
+          inc depth
           inc i
-          while i < line.len and line[i] != '>':
-            t.add(line[i])
-            inc i
-          if i < line.len:
-            t.add('>')
-            inc i
+        elif data[i] == ')':
+          dec depth
+          inc i
         else:
-          t.add(line[i])
           inc i
-      if i < line.len:
-        t.add(']')
-        inc i
-      result.add(t)
+    elif c == '[':
+      result.add(CMapTok(kind: tkLBrack))
+      inc i
+    elif c == ']':
+      result.add(CMapTok(kind: tkRBrack))
+      inc i
+    elif c == ')':
+      inc i
     else:
       var t = ""
-      while i < line.len and line[i] notin
-          {' ', '\x09', '\x0A', '\x0C', '\x0D', '<', '[', '%'}:
-        t.add(line[i])
+      while i < data.len and data[i] notin
+          {' ', '\x09', '\x0A', '\x0C', '\x0D', '<', '>', '[', ']', '(',
+            ')', '%'}:
+        t.add(data[i])
         inc i
       if t.len > 0:
-        result.add(t)
+        result.add(CMapTok(kind: tkWord, text: t))
+
+proc addBfEntry(m: var CMap, src: seq[byte], dst: seq[byte],
+    limits: PdfLimits) =
+  m.entries[codeInt(src)] = utf16be(dst)
+  m.maxKeyLen = max(m.maxKeyLen, src.len)
+  if m.entries.len > limits.maxObjects:
+    pdfFail("ToUnicode CMap exceeds limit " & $limits.maxObjects &
+      " entries")
+
+proc addBfRange(m: var CMap, lo, hi: seq[byte], dsts: seq[seq[byte]],
+    limits: PdfLimits) =
+  ## Single destination increments the low bytes; an array maps
+  ## each code in order, stopping at the range end.
+  m.maxKeyLen = max(m.maxKeyLen, max(lo.len, hi.len))
+  if dsts.len == 1:
+    let base = dsts[0]
+    if base.len == 0:
+      pdfFail("bad bfrange destination in ToUnicode CMap")
+    var v = codeInt(base)
+    var k = codeInt(lo)
+    while k <= codeInt(hi):
+      var enc = newSeq[byte](base.len)
+      var t = v
+      for j in countdown(base.len - 1, 0):
+        enc[j] = byte(t and 0xFF)
+        t = t shr 8
+      m.entries[k] = utf16be(enc)
+      inc k
+      inc v
+  else:
+    var k = codeInt(lo)
+    for d in dsts:
+      m.entries[k] = utf16be(d)
+      inc k
+      if k > codeInt(hi):
+        break
+  if m.entries.len > limits.maxObjects:
+    pdfFail("ToUnicode CMap exceeds limit " & $limits.maxObjects &
+      " entries")
+
+proc parseCMap*(data: string,
+    limits = defaultPdfLimits()): CMap =
+  ## General CMap parser: codespace ranges plus bfchar/bfrange
+  ## (Unicode destinations) and cidchar/cidrange (CID destinations).
+  ## Operands pair by token order, so any line layout parses the same.
+  result = CMap(entries: initTable[int, string](), maxKeyLen: 1,
+    cids: initTable[int, int]())
+  let toks = tokenizeCMap(data)
+  var mode = 0 # 0 top, 1 bfchar, 2 bfrange, 3 codespace, 4 cidchar, 5 cidrange
+  var hexes: seq[seq[byte]] = @[]
+  var arr: seq[seq[byte]] = @[]
+  var inArr = false
+  var cidVal = 0
+  var haveCid = false
+  proc dropFirst(s: var seq[seq[byte]], n: int) =
+    if n >= s.len:
+      s = @[]
+    else:
+      s = s[n .. ^1]
+  proc flushHex(m: var CMap) =
+    case mode
+    of 1:
+      while hexes.len >= 2:
+        m.addBfEntry(hexes[0], hexes[1], limits)
+        dropFirst(hexes, 2)
+    of 4:
+      while hexes.len >= 1 and haveCid:
+        let k = codeInt(hexes[0])
+        m.cids[k] = cidVal
+        m.maxKeyLen = max(m.maxKeyLen, hexes[0].len)
+        dropFirst(hexes, 1)
+        haveCid = false
+        if m.cids.len > limits.maxObjects:
+          pdfFail("CMap exceeds limit " & $limits.maxObjects &
+            " CID entries")
+    of 5:
+      while hexes.len >= 2 and haveCid:
+        let loB = hexes[0]
+        let hiB = hexes[1]
+        let lo = codeInt(loB)
+        let hi = codeInt(hiB)
+        m.maxKeyLen = max(m.maxKeyLen, max(loB.len, hiB.len))
+        dropFirst(hexes, 2)
+        var k = lo
+        var v = cidVal
+        while k <= hi:
+          m.cids[k] = v
+          inc k
+          inc v
+        cidVal = v
+        haveCid = false
+        if m.cids.len > limits.maxObjects:
+          pdfFail("CMap exceeds limit " & $limits.maxObjects &
+            " CID entries")
+    else:
+      discard
+  for t in toks:
+    case t.kind
+    of tkLBrack:
+      if mode == 2:
+        inArr = true
+        arr = @[]
+    of tkRBrack:
+      if mode == 2 and inArr:
+        inArr = false
+        while hexes.len >= 2:
+          let lo = hexes[0]
+          let hi = hexes[1]
+          dropFirst(hexes, 2)
+          result.addBfRange(lo, hi, arr, limits)
+    of tkHex:
+      let h = cmapHex(t.text)
+      case mode
+      of 1:
+        hexes.add(h)
+        result.flushHex()
+      of 2:
+        if inArr:
+          arr.add(h)
+        else:
+          hexes.add(h)
+          while hexes.len >= 3:
+            let lo = hexes[0]
+            let hi = hexes[1]
+            let dst = hexes[2]
+            dropFirst(hexes, 3)
+            result.addBfRange(lo, hi, @[dst], limits)
+      of 3:
+        hexes.add(h)
+        while hexes.len >= 2:
+          let lo = hexes[0]
+          let hi = hexes[1]
+          dropFirst(hexes, 2)
+          result.codes.add(CodeRange(lo: codeInt(lo),
+            hi: codeInt(hi), len: max(lo.len, hi.len)))
+      of 4:
+        hexes.add(h)
+        result.flushHex()
+      of 5:
+        hexes.add(h)
+        result.flushHex()
+      else:
+        discard
+    of tkWord:
+      case t.text
+      of "beginbfchar":
+        mode = 1
+        hexes = @[]
+      of "beginbfrange":
+        mode = 2
+        hexes = @[]
+        inArr = false
+      of "begincodespacerange":
+        mode = 3
+        hexes = @[]
+      of "begincidchar":
+        mode = 4
+        hexes = @[]
+        haveCid = false
+      of "begincidrange":
+        mode = 5
+        hexes = @[]
+        haveCid = false
+      of "endbfchar", "endbfrange", "endcodespacerange", "endcidchar",
+          "endcidrange":
+        mode = 0
+        hexes = @[]
+        inArr = false
+        haveCid = false
+      else:
+        if (mode == 4 or mode == 5) and not haveCid:
+          try:
+            cidVal = parseInt(t.text)
+            haveCid = true
+            result.hasCids = true
+            result.flushHex()
+          except ValueError:
+            discard
 
 proc parseToUnicode*(data: string,
     limits = defaultPdfLimits()): CMap =
   ## Parse a /ToUnicode CMap stream (already filter-decoded).
-  ## Understands bfchar and bfrange (single and array destinations).
-  result = CMap(entries: initTable[int, string](), maxKeyLen: 1)
-  var mode = 0 # 0 top, 1 bfchar, 2 bfrange
-  for rawLine in data.splitLines():
-    let line = rawLine.strip()
-    if line.len == 0 or line[0] == '%':
-      continue
-    if "beginbfchar" in line:
-      mode = 1
-      continue
-    if "beginbfrange" in line:
-      mode = 2
-      continue
-    if "endbfchar" in line or "endbfrange" in line:
-      mode = 0
-      continue
-    if mode == 0:
-      continue
-    let toks = splitTokens(line)
-    if mode == 1 and toks.len >= 2 and toks[0][0] == '<' and
-        toks[1][0] == '<':
-      let src = cmapHex(toks[0][1 .. ^2])
-      result.entries[codeInt(src)] = utf16be(cmapHex(toks[1][1 .. ^2]))
-      result.maxKeyLen = max(result.maxKeyLen, src.len)
-    elif mode == 2 and toks.len >= 3 and toks[0][0] == '<' and
-        toks[1][0] == '<':
-      let lo = cmapHex(toks[0][1 .. ^2])
-      let hi = cmapHex(toks[1][1 .. ^2])
-      result.maxKeyLen = max(result.maxKeyLen, max(lo.len, hi.len))
-      if toks[2][0] == '[':
-        let dsts = splitTokens(toks[2][1 .. ^2])
-        var k = codeInt(lo)
-        for d in dsts:
-          if d.len >= 2 and d[0] == '<':
-            result.entries[k] = utf16be(cmapHex(d[1 .. ^2]))
-          inc k
-          if k > codeInt(hi):
-            break
-      elif toks[2][0] == '<':
-        let base = cmapHex(toks[2][1 .. ^2])
-        if base.len == 0:
-          pdfFail("bad bfrange destination in ToUnicode CMap")
-        var v = codeInt(base)
-        var k = codeInt(lo)
-        while k <= codeInt(hi):
-          var enc = newSeq[byte](base.len)
-          var t = v
-          for j in countdown(base.len - 1, 0):
-            enc[j] = byte(t and 0xFF)
-            t = t shr 8
-          result.entries[k] = utf16be(enc)
-          inc k
-          inc v
-    if result.entries.len > limits.maxObjects:
-      pdfFail("ToUnicode CMap exceeds limit " & $limits.maxObjects &
-        " entries")
+  ## Understands bfchar and bfrange (single and array destinations);
+  ## destinations decode as UTF-16BE with surrogate support, so
+  ## ligatures mapping to several scalars work.
+  parseCMap(data, limits)
 
 proc glyphNameToUnicode*(name: string): int =
   ## Common Adobe glyph names plus uniXXXX/uXXXXXX. -1 when unknown.
