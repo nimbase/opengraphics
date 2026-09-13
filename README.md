@@ -58,9 +58,11 @@ import opengraphics/psd
 
 let doc = openPsd("tests/data/01.psd")
 echo doc.width, "x", doc.height, " layers: ", doc.layerCount
+
 # Walk the layer/group tree and print each layer's display name.
 for node in doc.layerTree():
   echo node.layer.displayName()
+
 # The flattened composite: PPM needs stdlib only, JPG needs libvips.
 doc.composite.savePpm("preview.ppm")
 doc.composite.saveImage("preview.jpg") # jpg/png/webp/tif/gif/heif/avif/jxl
@@ -97,10 +99,12 @@ echo "unlocked pages: ", locked.pageCount
 import opengraphics/pdf
 
 var b = newPdfBuilder() # catalog 1, page tree 2, content from 3 up
+
 # A content stream is just marked-up text: font F1 at 24pt, positioned
 # at (72, 720). Streams Flate-compress by default.
 let cnum = b.addContentStream(
   "BT /F1 24 Tf 72 720 Td (Hello writer) Tj ET")
+
 # Pages point at a /Resources dict; here F1 is plain Helvetica
 # (not embedded, so any reader can render it).
 let helv = CosObj(kind: coDict, keys: @["Type", "Subtype", "BaseFont"],
@@ -129,18 +133,22 @@ import std/tables
 
 # Any TrueType/OpenType program works; DejaVu ships with harfbuzz.
 let prog = readFile("../harfbuzz/tests/data/DejaVuSans.ttf")
+
 # One cached HarfBuzz face per program: shaping, measuring, subsetting.
 var sf = openShapedFont(prog)
 defer: close(sf)
+
 # Collect every codepoint you draw; the subset is cut at the end.
 var use = FontUse(fontBytes: prog, baseName: "DejaVuSans")
 var content: string
+
 # wrapText breaks on shaped widths so lines fit the 468pt column.
 for i, line in wrapText(sf, "Hello embedded writer", 24.0, 468.0):
   use.noteUse(line) # WinAnsi only; anything else fails loudly
   content.add(drawTextLine(72.0, 720.0 - float64(i) * 28.0,
     "F2", 24.0, line) & "\n")
 var b = newPdfBuilder()
+
 # finalizeFonts subsets the program, embeds it with matching /Widths
 # and /ToUnicode, and returns resource name to font object number.
 let fonts = b.finalizeFonts({"F2": use}.toTable)
@@ -155,9 +163,11 @@ import opengraphics/pdf
 
 # Memory-mapped: the 500kB file is never fully copied.
 var d = openMappedDoc("tests/data/pdf/file-example_PDF_500_kB.pdf")
+
 # Runs grouped into lines, blocks, and pages of plain text.
 let doc = d.extractDocumentText("1.4")
 echo "pages: ", doc.pageCount
+
 # Exact substring search from the stdlib, with page/line/col hits.
 for h in doc.searchText("Lorem"):
   echo "p", h.page, " line ", h.line, " col ", h.col, ": ", h.excerpt
@@ -179,6 +189,7 @@ import opengraphics/pdf
 
 var d = openMappedDoc("tests/data/pdf/file-example_PDF_500_kB.pdf")
 # Each page as classified rows (heading/paragraph/list/caption/other)
+
 # plus whitespace-grid tables (headers and rows of cell strings).
 let sheet = d.extractSheet("1.4")
 for p in sheet.pages:
