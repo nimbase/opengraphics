@@ -12,7 +12,7 @@
 ##
 ##   var use = FontUse(fontBytes: dejavu, baseName: "DejaVuSans")
 ##   let words = wrapText(sf, "Hello writer", 24.0, 468.0)
-##   var content = ""
+##   var content: string
 ##   for i, line in words:
 ##     use.noteUse(line)
 ##     content.add(drawTextLine(72.0, 720.0 - float64(i) * 28.0,

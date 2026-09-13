@@ -53,8 +53,8 @@ test "mapped images and passwords":
     names.add(im.name)
   check names.len == 7
   imgs.close()
-  check pdfNeedsPasswordFile(rc4Pdf)
-  check not pdfNeedsPasswordFile(textPdf)
+  check openPdfPasswordFile(rc4Pdf)
+  check not openPdfPasswordFile(textPdf)
   var locked = openMappedDoc(rc4Pdf, password = "user123")
   check locked.pageCount() == 1
   locked.close()

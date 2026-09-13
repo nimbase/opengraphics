@@ -28,11 +28,11 @@ proc contentsDict(d: var PdfDoc): CosObj =
     c = d.resolve(c)
   c
 
-test "needsPassword flags encrypted files":
-  check pdfNeedsPassword(readFile(Rc4))
-  check pdfNeedsPassword(readFile(Aes))
-  check pdfNeedsPassword(readFile(R6))
-  check not pdfNeedsPassword(readFile(Basic))
+test "openPdfPassword flags encrypted files":
+  check openPdfPassword(readFile(Rc4))
+  check openPdfPassword(readFile(Aes))
+  check openPdfPassword(readFile(R6))
+  check not openPdfPassword(readFile(Basic))
 
 test "rc4 user password reads content":
   let doc = readPdfBytes(readFile(Rc4), defaultPdfLimits(), "user123")
