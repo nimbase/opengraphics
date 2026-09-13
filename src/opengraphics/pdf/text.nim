@@ -2,11 +2,14 @@
 ##
 ## extractText walks a page's content operators with the M3a graphics
 ## state, decoding each shown string through the font's ToUnicode CMap
-## first, then Differences plus the base encoding. Positions come from
-## the text rendering matrix (font size, scale, rise, Tm, CTM); only
-## horizontal writing is supported, vertical CMaps raise a clear error.
-## Widths come from the font dictionary (/Widths, /DW plus /W); fonts
-## without any widths fall back to 500 units with positions best-effort.
+## first, then composite fallbacks (Encoding CMap, embedded-font GID
+## map, Registry/Ordering tables) or Differences plus the base
+## encoding for simple fonts. Positions come from the text rendering
+## matrix (font size, scale, rise, Tm, CTM); WMode 1 fonts advance
+## downward per DW2/W2 with the position vector applied, and their
+## runs are flagged for column grouping. Widths come from the font
+## dictionary (/Widths, /DW plus /W); fonts without any widths fall
+## back to 500 units with positions best-effort.
 
 import std/tables
 import std/unicode
@@ -16,6 +19,8 @@ import ./cos
 import ./docmodel
 import ./filters
 import ./cmap
+import ./cjkmaps
+import ./sfntcmap
 import ./gstate
 
 export gstate
@@ -32,6 +37,21 @@ type
     hasBase*: bool
     widths*: Table[int, float64]
     missingWidth*: float64
+    composite*: bool
+    ordering*: string ## ROS collection from CIDSystemInfo ("" when none)
+    hasOrdering*: bool
+    encName*: string ## predefined /Encoding CMap ("" when none/Identity)
+    hasEncName*: bool
+    encCids*: Table[int, int] ## code -> CID from an /Encoding stream
+    hasEncCids*: bool
+    codes*: seq[CodeRange] ## effective codespaces for splitting
+    sfntCmap*: Table[int, int] ## GID -> scalar from the embedded font
+    hasSfntCmap*: bool
+    cidToGid*: seq[int] ## empty means identity
+    wmode*: int ## 0 horizontal, 1 vertical
+    dw2vy*: float64 ## DW2 vertical origin (default 880)
+    dw2w1*: float64 ## DW2 vertical advance (default -1000)
+    w2*: Table[int, array[3, float64]] ## CID -> (w1y, vx, vy)
 
   TextRun* = object
     text*: string
@@ -39,7 +59,8 @@ type
     y*: float64
     size*: float64
     fontName*: string
-    w*: float64 ## device-space advance width (for gap-aware joining)
+    w*: float64 ## device-space advance extent (x for horizontal, y for vertical)
+    vert*: bool ## true for WMode 1 runs (column fragment, y-descending)
 
 proc decodeCode(fd: FontDecoder, code: int): string =
   if fd.hasCMap and fd.cmap.entries.hasKey(code):
@@ -60,6 +81,35 @@ proc decodeCode(fd: FontDecoder, code: int): string =
   # only the ASCII range decodes (shared by all Latin encodings).
   if code >= 32 and code < 127:
     return $chr(code)
+  "\xEF\xBF\xBD"
+
+proc decodeCompositeCode(fd: FontDecoder, code: int): string =
+  ## Composite chain: ToUnicode, then code to CID (/Encoding stream,
+  ## predefined CMap, else Identity), then embedded-font GID map, then
+  ## the Registry/Ordering tables. Anything unmapped is U+FFFD.
+  if fd.hasCMap and fd.cmap.entries.hasKey(code):
+    return fd.cmap.entries[code]
+  var cid = code
+  if fd.hasEncCids and fd.encCids.hasKey(code):
+    cid = fd.encCids[code]
+  elif fd.hasEncName:
+    let c = codeToCid(fd.encName, code)
+    if c >= 0:
+      cid = c
+  if fd.hasSfntCmap:
+    let gid =
+      if cid >= 0 and cid < fd.cidToGid.len: fd.cidToGid[cid]
+      else: cid
+    if fd.sfntCmap.hasKey(gid):
+      return $Rune(fd.sfntCmap[gid])
+  if fd.hasOrdering:
+    let u = cidToUnicode(fd.ordering, cid)
+    if u >= 0:
+      return $Rune(u)
+  if fd.hasEncName:
+    let u = codeToUnicode(fd.encName, code)
+    if u >= 0:
+      return $Rune(u)
   "\xEF\xBF\xBD"
 
 proc codeWidth(fd: FontDecoder, code: int): float64 =
@@ -88,6 +138,33 @@ proc parseW(arr: CosObj, widths: var Table[int, float64]) =
         for code in first .. last:
           widths[code] = w
 
+proc parseW2(arr: CosObj, w2: var Table[int, array[3, float64]]) =
+  ## CID /W2 array: per-CID (w1y, vx, vy) triples or first/last
+  ## ranges sharing one triple.
+  var i = 0
+  while i < arr.items.len:
+    let first = arr.items[i].asInt()
+    inc i
+    if i < arr.items.len and arr.items[i].kind == coArray:
+      var cid = first
+      let xs = arr.items[i].items
+      inc i
+      var j = 0
+      while j + 2 < xs.len:
+        w2[cid] = [xs[j].asFloat(), xs[j + 1].asFloat(),
+          xs[j + 2].asFloat()]
+        inc cid
+        j += 3
+    elif i + 3 <= arr.items.len - 1:
+      let last = arr.items[i].asInt()
+      let m = [arr.items[i + 1].asFloat(), arr.items[i + 2].asFloat(),
+        arr.items[i + 3].asFloat()]
+      i += 4
+      for cid in first .. last:
+        w2[cid] = m
+    else:
+      break
+
 proc loadDecoder*(d: var PdfDoc, fontRef: CosObj,
     name: string): FontDecoder =
   ## Build the decoder for one font resource (resolved reference).
@@ -101,7 +178,10 @@ proc loadDecoder*(d: var PdfDoc, fontRef: CosObj,
   result = FontDecoder(fontName: name,
     codeLen: if composite: 2 else: 1,
     diff: initTable[int, int](), widths: initTable[int, float64](),
-    missingWidth: 500.0)
+    encCids: initTable[int, int](), sfntCmap: initTable[int, int](),
+    w2: initTable[int, array[3, float64]](),
+    missingWidth: 500.0, composite: composite,
+    dw2vy: 880.0, dw2w1: -1000.0)
   var uni = font.dictGet("ToUnicode")
   if uni.kind == coRef:
     uni = d.resolve(uni)
@@ -113,7 +193,22 @@ proc loadDecoder*(d: var PdfDoc, fontRef: CosObj,
   var enc = font.dictGet("Encoding")
   if enc.kind == coRef:
     enc = d.resolve(enc)
-  if enc.kind == coName:
+  if composite and enc.kind == coStream:
+    let em = parseCMap(decodeCosStream(enc), d.limits)
+    if em.cids.len > 0:
+      result.encCids = em.cids
+      result.hasEncCids = true
+    if em.codes.len > 0:
+      result.codes = em.codes
+    if not result.hasCMap and em.entries.len > 0:
+      result.cmap = em
+      result.hasCMap = true
+  elif composite and enc.kind == coName:
+    if enc.name != "Identity-H" and enc.name != "Identity-V" and
+        hasCjkEncoding(enc.name):
+      result.encName = enc.name
+      result.hasEncName = true
+  elif enc.kind == coName:
     if enc.name == "WinAnsiEncoding":
       result.hasBase = true
       result.baseWinAnsi = true
@@ -140,10 +235,17 @@ proc loadDecoder*(d: var PdfDoc, fontRef: CosObj,
         elif started and item.kind == coName:
           result.diff[code] = glyphNameToUnicode(item.name)
           inc code
+  let wm = font.dictGet("WMode")
+  if composite and wm.kind == coInt:
+    result.wmode = wm.ival
   if composite:
-    if font.dictGet("DescendantFonts").kind == coArray and
-        font.dictGet("DescendantFonts").items.len > 0:
-      var cid = font.dictGet("DescendantFonts").items[0]
+    if result.codes.len == 0 and result.hasEncName:
+      result.codes = cmapCodespaces(result.encName)
+    var descFonts = font.dictGet("DescendantFonts")
+    if descFonts.kind == coRef:
+      descFonts = d.resolve(descFonts)
+    if descFonts.kind == coArray and descFonts.items.len > 0:
+      var cid = descFonts.items[0]
       if cid.kind == coRef:
         cid = d.resolve(cid)
       let dw = cid.dictGet("DW")
@@ -152,6 +254,54 @@ proc loadDecoder*(d: var PdfDoc, fontRef: CosObj,
       let w = cid.dictGet("W")
       if w.kind == coArray:
         parseW(w, result.widths)
+      let dw2 = cid.dictGet("DW2")
+      if dw2.kind == coArray and dw2.items.len >= 2:
+        result.dw2vy = dw2.items[0].asFloat()
+        result.dw2w1 = dw2.items[1].asFloat()
+      let w2 = cid.dictGet("W2")
+      if w2.kind == coArray:
+        parseW2(w2, result.w2)
+      var sys = cid.dictGet("CIDSystemInfo")
+      if sys.kind == coRef:
+        sys = d.resolve(sys)
+      if sys.kind == coDict:
+        let reg = sys.dictGet("Registry")
+        let regName =
+          if reg.kind == coStr: reg.sval
+          elif reg.kind == coName: reg.name
+          else: ""
+        let ord = sys.dictGet("Ordering")
+        let ordName =
+          if ord.kind == coStr: ord.sval
+          elif ord.kind == coName: ord.name
+          else: ""
+        if regName == "Adobe" and hasCjkOrdering(ordName):
+          result.ordering = ordName
+          result.hasOrdering = true
+      var gidMap = cid.dictGet("CIDToGIDMap")
+      if gidMap.kind == coRef:
+        gidMap = d.resolve(gidMap)
+      if gidMap.kind == coStream:
+        let raw = decodeCosStream(gidMap)
+        var i = 0
+        while i + 1 < raw.len:
+          result.cidToGid.add(
+            int(byte(raw[i])) * 256 + int(byte(raw[i + 1])))
+          i += 2
+      var desc = cid.dictGet("FontDescriptor")
+      if desc.kind == coRef:
+        desc = d.resolve(desc)
+      if desc.kind == coDict:
+        for key in ["FontFile2", "FontFile3"]:
+          var f = desc.dictGet(key)
+          if f.kind == coRef:
+            f = d.resolve(f)
+          if f.kind == coStream:
+            let cm = parseSfntCmap(decodeCosStream(f))
+            if cm.len > 0:
+              result.sfntCmap = cm
+              result.hasSfntCmap = true
+              break
   else:
     let mw = font.dictGet("MissingWidth")
     if mw.kind == coInt:
@@ -176,6 +326,81 @@ proc splitCodes(s: string, codeLen: int): seq[int] =
     result.add(code)
     i += codeLen
 
+proc splitCompositeCodes(s: string, codes: seq[CodeRange],
+    defaultLen: int): seq[int] =
+  ## Longest match against the codespace ranges; without known ranges
+  ## every code is defaultLen bytes (Identity behavior).
+  var i = 0
+  while i < s.len:
+    var matched = false
+    for L in countdown(min(4, s.len - i), 1):
+      var code = 0
+      for j in 0 ..< L:
+        code = code * 256 + int(byte(s[i + j]))
+      var ok = codes.len == 0 and L == defaultLen
+      if not ok:
+        for r in codes:
+          if r.len == L and code >= r.lo and code <= r.hi:
+            ok = true
+            break
+      if ok:
+        result.add(code)
+        i += L
+        matched = true
+        break
+    if not matched:
+      pdfFail("code outside codespace in composite text string")
+
+proc cidOfCode(fd: FontDecoder, code: int): int =
+  ## Code to CID without the Unicode step (for metrics lookup).
+  if fd.hasEncCids and fd.encCids.hasKey(code):
+    return fd.encCids[code]
+  if fd.hasEncName:
+    let c = codeToCid(fd.encName, code)
+    if c >= 0:
+      return c
+  code
+
+proc verticalMetric(fd: FontDecoder, cid: int): array[3, float64] =
+  ## (w1y, vx, vy): per-CID /W2 override, else (DW2 advance,
+  ## half the horizontal width, DW2 origin).
+  if fd.w2.hasKey(cid):
+    return fd.w2[cid]
+  let w0 =
+    if fd.widths.hasKey(cid): fd.widths[cid]
+    else: fd.missingWidth
+  [fd.dw2w1, w0 / 2.0, fd.dw2vy]
+
+proc showTextVertical(gs: var GState, fd: FontDecoder,
+    codes: seq[int], text: string, fs: float64,
+    runs: var seq[TextRun]) =
+  ## WMode 1: Tm advances downward per glyph (horizontal displacement
+  ## is always 0); the run origin shifts by the first glyph's position
+  ## vector in text space. charSpace and wordSpace apply vertically,
+  ## unscaled by Th.
+  let th = gs.text.scale / 100.0
+  let m0 = fd.verticalMetric(fd.cidOfCode(codes[0]))
+  let otm = concatMatrix(
+    [1.0, 0.0, 0.0, 1.0, m0[1] * fs / 1000.0, m0[2] * fs / 1000.0],
+    gs.textMatrix)
+  let trm = concatMatrix([fs * th, 0.0, 0.0, fs, 0.0, gs.text.rise],
+    concatMatrix(otm, gs.ctm))
+  var advText = 0.0
+  for code in codes:
+    let decoded = fd.decodeCompositeCode(code)
+    let m = fd.verticalMetric(fd.cidOfCode(code))
+    var ty = m[0] * fs / 1000.0 + gs.text.charSpace
+    if decoded == " ":
+      ty += gs.text.wordSpace
+    advText += ty
+    let t: Matrix = [1.0, 0.0, 0.0, 1.0, 0.0, ty]
+    gs.textMatrix = concatMatrix(t, gs.textMatrix)
+  var w = 0.0
+  if fs != 0.0:
+    w = advText * abs(trm[3]) / fs
+  runs.add(TextRun(text: text, x: trm[4], y: trm[5], size: fs,
+    fontName: fd.fontName, w: w, vert: true))
+
 proc showText(d: var PdfDoc, gs: var GState, fd: FontDecoder,
     s: string, runs: var seq[TextRun]) =
   if s.len == 0:
@@ -185,14 +410,25 @@ proc showText(d: var PdfDoc, gs: var GState, fd: FontDecoder,
   let trm = concatMatrix([fs * th, 0.0, 0.0, fs, 0.0, gs.text.rise],
     concatMatrix(gs.textMatrix, gs.ctm))
   var text = ""
-  for code in splitCodes(s, fd.codeLen):
-    text.add(fd.decodeCode(code))
+  var codes: seq[int]
+  if fd.composite:
+    codes = splitCompositeCodes(s, fd.codes, fd.codeLen)
+    for code in codes:
+      text.add(fd.decodeCompositeCode(code))
+  else:
+    codes = splitCodes(s, fd.codeLen)
+    for code in codes:
+      text.add(fd.decodeCode(code))
+  if fd.composite and fd.wmode == 1:
+    showTextVertical(gs, fd, codes, text, fs, runs)
+    return
   # Total text-space advance, mapped to device x by the rendering
-  # matrix scale. Exact for unrotated text; an approximation under
   # rotation, which only affects space-vs-kern joining downstream.
   var advText = 0.0
-  for code in splitCodes(s, fd.codeLen):
-    let decoded = fd.decodeCode(code)
+  for code in codes:
+    let decoded =
+      if fd.composite: fd.decodeCompositeCode(code)
+      else: fd.decodeCode(code)
     var tx = (fd.codeWidth(code) * fs / 1000.0 + gs.text.charSpace) * th
     if decoded == " ":
       tx += gs.text.wordSpace * th

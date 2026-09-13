@@ -54,6 +54,16 @@ test "kerned TJ joins without a space":
   check p1.lines.len == 1
   check p1.lines[0].text == "Kern"
 
+test "vertical runs group into column lines":
+  var d = openDoc(readFile("tests" / "data" / "pdf" / "m8_cjk.pdf"))
+  let p = d.pageText(1)
+  check p.runs.len == 2
+  check p.lines.len == 2
+  check p.lines[0].text == "日"
+  check p.lines[1].text == "あ"
+  check p.blocks.len == 1
+  check p.blocks[0].text == "日\nあ"
+
 test "empty page is empty":
   var b = newPdfBuilder()
   discard b.addPage(100.0, 200.0,
