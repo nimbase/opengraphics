@@ -259,7 +259,8 @@ proc layerPixelsToImage*(l: Layer): ImageBuf =
     img.data[k] = px
   result = img
 
-proc parseLayerInfo*(r: var BinReader, optsSkipImage: bool): LayerInfo =
+proc parseLayerInfo*(r: var BinReader, optsSkipImage: bool,
+    limits = defaultLimits()): LayerInfo =
   let sectionLen = int(r.readU32BE())
   if sectionLen == 0:
     return LayerInfo(layers: @[], hasMergedAlpha: false,
@@ -280,12 +281,24 @@ proc parseLayerInfo*(r: var BinReader, optsSkipImage: bool): LayerInfo =
     if count < 0:
       hasMergedAlpha = true
       count = -count
+    if count > limits.maxLayers:
+      raise newException(PsdError, "layer count " & $count &
+        " exceeds limit " & $limits.maxLayers)
     for _ in 0 ..< count:
       layers.add(parseOneLayerRecord(r))
     # channel image data, in same layer order
     for li in 0 ..< layers.len:
       let w = layers[li].width()
       let h = layers[li].height()
+      # Bound the allocation before touching channel bytes: each of the
+      # layer's channels decodes to w*h bytes.
+      if layers[li].channels.len > 0 and w > 0 and h > 0:
+        let total = int64(layers[li].channels.len) * int64(w) * int64(h)
+        if total > int64(limits.maxPixels):
+          raise newException(PsdError, "layer '" &
+            layers[li].displayName() & "' size " & $w & "x" & $h & "x" &
+            $layers[li].channels.len & "ch exceeds pixel limit " &
+            $limits.maxPixels)
       var planes: seq[seq[byte]] = @[]
       var comp: Compression = Raw
       if optsSkipImage:

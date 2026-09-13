@@ -45,9 +45,11 @@ proc layerTree*(d: Document): seq[LayerNode] =
   ## See buildLayerTree for divider semantics.
   buildLayerTree(d.layerInfo.layers)
 
-proc readPsdBytes*(data: seq[byte], opts = ReadOptions()): Document =
+proc readPsdBytes*(data: seq[byte], opts = ReadOptions(),
+    limits = defaultLimits()): Document =
   var r = initReader(data)
   let hdr = parseHeader(r)
+  limits.checkDimensions(hdr.width, hdr.height, "document")
   if hdr.depth != 8:
     raise newException(PsdError,
       "unsupported depth " & $hdr.depth & " (v1 supports 8-bit only)")
@@ -60,12 +62,13 @@ proc readPsdBytes*(data: seq[byte], opts = ReadOptions()): Document =
     for b in res.blocks.mitems:
       if b.id == ThumbnailRgbId or b.id == ThumbnailBgrId:
         b.data = @[]
-  let li = parseLayerInfo(r, opts.skipLayerImageData)
+  let li = parseLayerInfo(r, opts.skipLayerImageData, limits)
   var comp = Raw
   var img = ImageBuf(width: 0, height: 0, data: @[])
   var hasComp = false
   if not opts.skipCompositeImageData:
     if not r.atEnd():
+      limits.checkDimensions(hdr.width, hdr.height, "composite")
       let isRgb = hdr.colorMode == Rgb
       let decoded = decodeComposite(r, hdr.width, hdr.height, hdr.channels, isRgb)
       img = decoded.img
@@ -75,12 +78,14 @@ proc readPsdBytes*(data: seq[byte], opts = ReadOptions()): Document =
     layerInfo: li, composite: img, hasComposite: hasComp,
     compositeCompression: comp)
 
-proc readPsdBytes*(data: string, opts = ReadOptions()): Document =
+proc readPsdBytes*(data: string, opts = ReadOptions(),
+    limits = defaultLimits()): Document =
   var s = newSeq[byte](data.len)
   for i, c in data:
     s[i] = byte(c)
-  readPsdBytes(s, opts)
+  readPsdBytes(s, opts, limits)
 
-proc openPsd*(path: string, opts = ReadOptions()): Document =
+proc openPsd*(path: string, opts = ReadOptions(),
+    limits = defaultLimits()): Document =
   let raw = readFile(path)
-  readPsdBytes(raw, opts)
+  readPsdBytes(raw, opts, limits)

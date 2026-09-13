@@ -14,11 +14,12 @@
 
 ## Features
 - Read Adobe Photoshop `.psd` files with pure Nim stdlib, no dependencies: headers, layers and group trees, Raw and RLE pixels, thumbnails, ICC profiles
+- Read Adobe Illustrator `.ai` files (modern PDF-based, v1: kind detection, artboards, XMP metadata), pure Nim stdlib, no dependencies
 - Shared pixel model (`ImageBuf`) designed for conversion from one format to another
 - Unknown blocks preserved as raw bytes so future writers can round-trip files
 
 ## Roadmap
-- Read support for `.ai`, `.eps`, `.aep`, and more
+- Read support for `.eps`, `.aep`, and more
 - Writers for each supported format
 - Format-to-format conversion helpers
 - Building blocks for high-level libraries and apps compatible with popular graphics formats
