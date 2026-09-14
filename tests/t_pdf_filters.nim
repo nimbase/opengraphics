@@ -2,6 +2,9 @@ import std/strutils
 import unittest
 import zlib/zlib_api
 import ../src/opengraphics/pdf
+import ../src/opengraphics/pdf/cos
+import ../src/opengraphics/pdf/docmodel
+import ../src/opengraphics/pdf/filters
 import ./pdf_support
 
 proc rawDeflate(data: string): string =

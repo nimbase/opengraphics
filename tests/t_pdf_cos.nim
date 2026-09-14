@@ -2,6 +2,9 @@ import std/strutils
 import std/tables
 import unittest
 import ../src/opengraphics/pdf
+import ../src/opengraphics/pdf/cos
+import ../src/opengraphics/pdf/lexer
+import ../src/opengraphics/pdf/docmodel
 import ./pdf_support
 
 proc objAt(data: string, num: int): CosObj =
