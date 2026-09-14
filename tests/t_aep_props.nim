@@ -97,10 +97,19 @@ test "animated byte marks without values":
 test "keyframe list marks animated":
   let n = tdbsNode(@[leaf("tdb4", tdb4bytes(2, 0x00, 0x08, 0)),
     leaf("cdat", f64s(1.0, 2.0)),
-    RifxChunk(id: "LIST", listType: "list")])
+    RifxChunk(id: "LIST", listType: "list",
+      children: @[leaf("lhd3", newSeq[byte](52))])])
   let v = parseTdbs(n)
   check v.isAnimated
   check v.values.len == 0
+  check v.keyframes.len == 0
+
+test "keyframe list without lhd3 rejected":
+  let n = tdbsNode(@[leaf("tdb4", tdb4bytes(2, 0x00, 0x08, 0)),
+    leaf("cdat", f64s(1.0, 2.0)),
+    RifxChunk(id: "LIST", listType: "list")])
+  expect(AepError):
+    discard parseTdbs(n)
 
 test "static without cdat rejected":
   let n = tdbsNode(@[leaf("tdb4", tdb4bytes(1, 0x01, 0x08, 0))])
