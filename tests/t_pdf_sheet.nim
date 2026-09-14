@@ -3,6 +3,9 @@ import std/os
 import std/strutils
 import unittest
 import ../src/opengraphics/pdf
+import ../src/opengraphics/pdf/cos
+import ../src/opengraphics/pdf/write
+import ../src/opengraphics/pdf/sheet
 
 const bigPdf = "tests" / "data" / "pdf" / "file-example_PDF_500_kB.pdf"
 

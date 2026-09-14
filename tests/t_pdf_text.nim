@@ -12,6 +12,14 @@ import std/strutils
 import std/tables
 import unittest
 import ../src/opengraphics/pdf
+import ../src/opengraphics/pdf/cos
+import ../src/opengraphics/pdf/docmodel
+import ../src/opengraphics/pdf/cmap
+import ../src/opengraphics/pdf/cjkmaps
+import ../src/opengraphics/pdf/shape
+import ../src/opengraphics/pdf/gstate
+import ../src/opengraphics/pdf/doctext
+import ../src/opengraphics/pdf/sfntcmap
 import ./pdf_support
 
 const TextPdf = "tests/data/pdf/m3b_text.pdf"

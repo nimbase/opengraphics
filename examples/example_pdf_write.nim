@@ -2,6 +2,11 @@
 import std/os
 import std/tables
 import ../src/opengraphics/pdf
+import ../src/opengraphics/pdf/cos
+import ../src/opengraphics/pdf/docmodel
+import ../src/opengraphics/pdf/write
+import ../src/opengraphics/pdf/shape
+import ../src/opengraphics/pdf/fontembed
 
 var b = newPdfBuilder()
 let f1 = CosObj(kind: coDict, keys: @["Type", "Subtype", "BaseFont"],

@@ -128,7 +128,7 @@ proc padNum(v, width: int): string =
 
 proc emitFile(header: string, objs: seq[RawObj], size: int,
     rootNum, rootGen: int, idFirst, idSecond: string,
-    prev = -1): string =
+    prev = -1, infoNum = 0, infoGen = 0): string =
   ## Full file: header, indirect objects with a fresh xref table,
   ## trailer, startxref. Object numbers are preserved; offsets are new.
   var sorted = objs
@@ -159,6 +159,8 @@ proc emitFile(header: string, objs: seq[RawObj], size: int,
   if idFirst.len > 0:
     result.add(" /ID [" & writeStr(idFirst) & " " &
       writeStr(if idSecond.len > 0: idSecond else: idFirst) & "]")
+  if infoNum > 0:
+    result.add(" /Info " & $infoNum & " " & $infoGen & " R")
   if prev >= 0:
     result.add(" /Prev " & $prev)
   result.add(" >>\nstartxref\n" & $xrefPos & "\n%%EOF\n")
@@ -177,10 +179,19 @@ type
     objs*: seq[RawObj]
     kids*: seq[int]
     nextNum*: int
+    infoTitle*: string
+    infoAuthor*: string
 
 proc newPdfBuilder*(): PdfBuilder =
   ## Catalog is 1, page tree is 2, caller objects start at 3.
-  PdfBuilder(objs: @[], kids: @[], nextNum: firstContentNum)
+  PdfBuilder(objs: @[], kids: @[], nextNum: firstContentNum,
+    infoTitle: "", infoAuthor: "")
+
+proc setInfo*(b: var PdfBuilder, title = "", author = "") =
+  ## Document metadata for the trailer /Info dict. Empty strings are
+  ## omitted; call before `buildPdf`.
+  b.infoTitle = title
+  b.infoAuthor = author
 
 proc addObject*(b: var PdfBuilder, body: string, gen = 0): int =
   ## Store a pre-serialized object body; returns its number.
@@ -237,6 +248,50 @@ proc addPage*(b: var PdfBuilder, width, height: float64, contentNum: int,
   result = b.addValue(page)
   b.kids.add(result)
 
+proc addJpegImage*(b: var PdfBuilder, jpegBytes: string, width,
+    height: int, components = 3): int =
+  ## Image XObject from JPEG bytes (DCTDecode passthrough). `components`
+  ## selects the colorspace: 1 DeviceGray, 3 DeviceRGB (default).
+  if jpegBytes.len == 0:
+    pdfFail("cannot embed empty JPEG image")
+  if width <= 0 or height <= 0:
+    pdfFail("image has non-positive size")
+  let cs = if components == 1: "DeviceGray" else: "DeviceRGB"
+  let dict = CosObj(kind: coDict,
+    keys: @["Type", "Subtype", "Width", "Height", "ColorSpace",
+      "BitsPerComponent", "Filter"],
+    vals: @[CosObj(kind: coName, name: "XObject"),
+      CosObj(kind: coName, name: "Image"),
+      CosObj(kind: coInt, ival: width),
+      CosObj(kind: coInt, ival: height),
+      CosObj(kind: coName, name: cs),
+      CosObj(kind: coInt, ival: 8),
+      CosObj(kind: coName, name: "DCTDecode")])
+  b.addStream(dict, jpegBytes)
+
+proc addRgbImage*(b: var PdfBuilder, pixels: string, width,
+    height: int, components = 3): int =
+  ## Image XObject from raw 8-bit samples, Flate-compressed on write.
+  ## `pixels` must hold width*height*components bytes (1 gray, 3 rgb).
+  if width <= 0 or height <= 0:
+    pdfFail("image has non-positive size")
+  if components != 1 and components != 3:
+    pdfFail("image components must be 1 (gray) or 3 (rgb)")
+  if pixels.len != width * height * components:
+    pdfFail("pixel size mismatch embedding image")
+  let cs = if components == 1: "DeviceGray" else: "DeviceRGB"
+  let dict = CosObj(kind: coDict,
+    keys: @["Type", "Subtype", "Width", "Height", "ColorSpace",
+      "BitsPerComponent", "Filter"],
+    vals: @[CosObj(kind: coName, name: "XObject"),
+      CosObj(kind: coName, name: "Image"),
+      CosObj(kind: coInt, ival: width),
+      CosObj(kind: coInt, ival: height),
+      CosObj(kind: coName, name: cs),
+      CosObj(kind: coInt, ival: 8),
+      CosObj(kind: coName, name: "FlateDecode")])
+  b.addStream(dict, deflateEncode(pixels))
+
 proc buildPdf*(b: PdfBuilder): string =
   ## Assemble catalog, page tree and caller objects into one file.
   var kids: seq[CosObj] = @[]
@@ -254,8 +309,22 @@ proc buildPdf*(b: PdfBuilder): string =
   var objs = @[(catalogNum, 0, catalog), (pagesNum, 0, pages)]
   for o in b.objs:
     objs.add(o)
-  let size = max(b.nextNum, firstContentNum)
-  emitFile(pdfMagic, objs, size, catalogNum, 0, "", "")
+  var infoNum = 0
+  var size = max(b.nextNum, firstContentNum)
+  if b.infoTitle.len > 0 or b.infoAuthor.len > 0:
+    var keys: seq[string] = @[]
+    var vals: seq[CosObj] = @[]
+    if b.infoTitle.len > 0:
+      keys.add("Title")
+      vals.add(CosObj(kind: coStr, sval: b.infoTitle))
+    if b.infoAuthor.len > 0:
+      keys.add("Author")
+      vals.add(CosObj(kind: coStr, sval: b.infoAuthor))
+    infoNum = b.nextNum
+    size = max(b.nextNum + 1, firstContentNum)
+    objs.add((infoNum, 0, writeCos(CosObj(kind: coDict, keys: keys,
+      vals: vals))))
+  emitFile(pdfMagic, objs, size, catalogNum, 0, "", "", -1, infoNum, 0)
 
 # ---------------------------------------------------------------------------
 # Rewrite: re-emit every live object with fresh offsets

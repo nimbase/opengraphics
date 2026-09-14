@@ -23,6 +23,12 @@ import std/tables
 import std/unicode
 import unittest
 import ../src/opengraphics/pdf
+import ../src/opengraphics/pdf/cos
+import ../src/opengraphics/pdf/docmodel
+import ../src/opengraphics/pdf/shape
+import ../src/opengraphics/pdf/write
+import ../src/opengraphics/pdf/fontembed
+import ../src/opengraphics/pdf/gstate
 
 const
   TextPdf = "tests/data/pdf/m3b_text.pdf"

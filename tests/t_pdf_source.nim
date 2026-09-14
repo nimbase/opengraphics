@@ -2,6 +2,8 @@
 import std/os
 import unittest
 import ../src/opengraphics/pdf
+import ../src/opengraphics/pdf/source
+import ../src/opengraphics/pdf/docmodel
 import pdf_support
 
 const

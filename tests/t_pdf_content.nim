@@ -8,6 +8,10 @@ import std/math
 import std/strutils
 import unittest
 import ../src/opengraphics/pdf
+import ../src/opengraphics/pdf/cos
+import ../src/opengraphics/pdf/docmodel
+import ../src/opengraphics/pdf/content
+import ../src/opengraphics/pdf/gstate
 
 const
   Basic = "tests/data/pdf/m3a_basic.pdf"

@@ -3,6 +3,10 @@ import std/os
 import std/strutils
 import unittest
 import ../src/opengraphics/pdf
+import ../src/opengraphics/pdf/cos
+import ../src/opengraphics/pdf/lexer
+import ../src/opengraphics/pdf/docmodel
+import ../src/opengraphics/pdf/write
 import pdf_support
 
 proc parseOne(s: string): CosObj =

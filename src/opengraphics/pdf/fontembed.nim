@@ -109,6 +109,106 @@ proc measureText*(sf: ShapedFont, text: string,
   ## 1000 upm times the size. Includes kerning, ligatures and GPOS.
   sf.shapedWidth(text) / 1000.0 * size
 
+# ---------------------------------------------------------------------------
+# Builtin base-14 Helvetica: unembedded measurement for the default font
+# ---------------------------------------------------------------------------
+#
+# Advances below are the Adobe Helvetica AFM widths (1000 upm, indexed
+# by WinAnsi byte). Spot-verified against the licensed Apple Helvetica
+# cut (A 722, a 556, m 833, i 222, space 278, Scaron 667, perthousand
+# 1000, endash 556) and Ghostscript output for the ASCII range
+# (quoteright 222); modern Helvetica cuts drift on quotes and Euro, so
+# the Adobe values win as the documented PDF base-14 standard. Zeros
+# mean no Adobe glyph: C0 controls, DEL, the WinAnsi-undefined C1
+# slots, and Euro U+20AC (Adobe Helvetica predates it). Those fail
+# loudly in `builtinMeasure` instead of wrapping on a wrong width.
+
+const helveticaWidths*: array[256, int] = [
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, # 0-15
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, # 16-31
+  278, 278, 355, 556, 556, 889, 667, 222, # 32-39 space ! " # $ % & '
+  333, 333, 389, 584, 278, 333, 278, 278, # 40-47 ( ) * + , - . /
+  556, 556, 556, 556, 556, 556, 556, 556, # 48-55 0-7
+  556, 556, 278, 278, 584, 584, 584, 556, # 56-63 8 9 : ; < = > ?
+  1015, 722, 722, 722, 722, 667, 611, 778, # 64-71 @ A-G
+  722, 278, 500, 667, 556, 833, 722, 778, # 72-79 H-O
+  667, 778, 722, 667, 611, 722, 667, 944, # 80-87 P-W
+  667, 667, 611, 278, 278, 278, 469, 556, # 88-95 X Y Z [ \ ] ^ _
+  222, 556, 556, 500, 556, 556, 278, 556, # 96-103 ` a-g
+  556, 222, 222, 500, 222, 833, 556, 556, # 104-111 h-o
+  556, 556, 333, 500, 278, 556, 500, 722, # 112-119 p-w
+  500, 500, 500, 334, 260, 334, 584, 0, # 120-127 x y z { | } ~ DEL
+  0, 0, 222, 556, 222, 1000, 556, 556, # 128-135 Euro - , f , ... t d
+  469, 1000, 667, 333, 1000, 0, 611, 0, # 136-143 ^ %o S < OE - Z -
+  0, 222, 222, 222, 222, 556, 556, 1000, # 144-151 - ' " " . - - --
+  222, 822, 500, 333, 1000, 0, 611, 667, # 152-159 ~ TM s > oe - z Ydier
+  278, 333, 556, 556, 556, 556, 260, 556, # 160-167 nbsp i c £ o ¥ | §
+  333, 737, 370, 556, 584, 333, 737, 333, # 168-175 ¨ © a « ¬ ­ ® ¯
+  400, 584, 333, 333, 222, 556, 537, 278, # 176-183 ° ± ² ³ ´ µ ¶ ·
+  333, 333, 370, 556, 834, 834, 834, 611, # 184-191 ¸ ¹ º » ¼ ½ ¾ ¿
+  722, 722, 722, 722, 722, 722, 1000, 722, # 192-199 À-Æ Ç
+  667, 667, 667, 667, 278, 278, 278, 278, # 200-207 È-Ï
+  722, 722, 778, 778, 778, 778, 778, 584, # 208-215 Ð Ñ Ò-Ö ×
+  778, 722, 722, 722, 722, 667, 667, 611, # 216-223 Ø Ù-Ü Ý Þ ß
+  556, 556, 556, 556, 556, 556, 889, 500, # 224-231 à-å æ ç
+  556, 556, 556, 556, 222, 222, 222, 222, # 232-239 è-ï
+  500, 556, 556, 556, 556, 556, 556, 584, # 240-247 ð ñ ò-ö ÷
+  556, 556, 556, 556, 556, 500, 556, 500] # 248-255 ø ù-ü ý þ ÿ
+
+proc builtinMeasure*(text: string, size: float64): float64 =
+  ## Text-space width of WinAnsi `text` at `size` from the Helvetica
+  ## AFM table. No kerning or ligatures (base-14 has neither in the
+  ## writer). Fails loudly outside WinAnsi and on codes with no Adobe
+  ## advance (controls, DEL, undefined C1 slots, Euro): those need a
+  ## loaded font instead.
+  var total = 0
+  for r in text.runes:
+    let b = winAnsiByte(r)
+    if b < 0:
+      pdfFail("text U+" & toHex(int(r), 4) &
+        " is outside WinAnsi; load a font for full Unicode")
+    let w = helveticaWidths[b]
+    if w == 0:
+      pdfFail("U+" & toHex(int(r), 4) &
+        " has no advance in builtin Helvetica; load a font for it")
+    total += w
+  float64(total) / 1000.0 * size
+
+proc builtinWrapText*(text: string, size,
+    maxWidth: float64): seq[string] =
+  ## `wrapText` over AFM widths: same greedy rules, `\n` breaks, space
+  ## runs collapse, overlong words overflow on their own line.
+  result = @[]
+  for para in text.split('\n'):
+    var line = ""
+    var lineW = 0.0
+    let spW = builtinMeasure(" ", size)
+    for word in para.split(' '):
+      if word.len == 0:
+        continue
+      let w = builtinMeasure(word, size)
+      if line.len == 0:
+        line = word
+        lineW = w
+      elif lineW + spW + w <= maxWidth + 1e-6:
+        line.add(' ')
+        line.add(word)
+        lineW += spW + w
+      else:
+        result.add(line)
+        line = word
+        lineW = w
+    result.add(line)
+
+proc builtinFontDict*(): CosObj =
+  ## Unembedded base-14 Helvetica font dictionary. The viewer
+  ## substitutes its own Helvetica; nothing is measured from or
+  ## embedded into the file.
+  CosObj(kind: coDict, keys: @["Type", "Subtype", "BaseFont"],
+    vals: @[CosObj(kind: coName, name: "Font"),
+      CosObj(kind: coName, name: "Type1"),
+      CosObj(kind: coName, name: "Helvetica")])
+
 proc drawTextLine*(x, y: float64, resName: string, size: float64,
     text: string): string =
   ## One `BT...ET` content line drawing `text` (WinAnsi, already
