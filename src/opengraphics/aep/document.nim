@@ -86,3 +86,20 @@ proc layerProperties*(comp: AepComp, layerId: uint32,
 proc layerTransform*(comp: AepComp, layerId: uint32,
     limits = defaultAepLimits()): seq[PropInfo] =
   layerProperties(comp, layerId, ["ADBE Transform Group"], limits)
+
+proc layerOrientations*(comp: AepComp, layerId: uint32,
+    limits = defaultAepLimits()): seq[OrientationInfo] =
+  ## Every LIST otst of a layer, document order, any group depth.
+  ## Decoded on demand so inventory stays cheap.
+  result = @[]
+  for g in collectGroups(layerNode(comp, layerId)):
+    for o in orientationsIn(g, limits):
+      result.add(o)
+
+proc layerOrientation*(comp: AepComp, layerId: uint32,
+    limits = defaultAepLimits()): OrientationInfo =
+  let all = layerOrientations(comp, layerId, limits)
+  if all.len == 0:
+    raise newException(AepError,
+      "layer has no orientation: " & $layerId)
+  all[0]

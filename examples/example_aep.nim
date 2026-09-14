@@ -15,6 +15,12 @@ for c in doc.comps:
     for p in layerTransform(c, l.id):
       if p.value.kind == PropVector and not p.value.isAnimated:
         echo "    ", p.matchName, " = ", p.value.values
+      elif p.value.isAnimated:
+        echo "    ", p.matchName, " animated keyframes=",
+          p.value.keyframes.len
+    for o in layerOrientations(c, l.id):
+      echo "    ", o.matchName, " static=", o.staticValue,
+        " frames=", o.frames.len
 for f in doc.footage:
   echo "footage ", f.id, " \"", f.name, "\" ", f.assetType,
     " ", f.width, "x", f.height, " ", f.filePath

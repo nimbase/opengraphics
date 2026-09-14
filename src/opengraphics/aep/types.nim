@@ -3,7 +3,8 @@
 ## v1 scope: read-only project inventory. Container (`RIFX` + `Egg!`),
 ## item routing (`idta`), comp headers (`cdta`), layer records (`ldta`),
 ## footage size and type (`sspc` / `opti`), match name scanning (`tdmn`).
-## No `cdat` values, no keyframes, no writer.
+## v2 adds `cdat` statics plus `tdb4` typing, v3 adds `lhd3`/`ldat`
+## keyframes. No writer.
 
 type
   AepError* = object of CatchableError
@@ -30,6 +31,32 @@ type
     PropVector = 3 ## components floats (scalar when components == 1)
     PropUnknown = -1
 
+  KeyframeEase* {.pure.} = enum
+    ## Ease mode byte of the common keyframe header.
+    EaseUnknown = 0
+    EaseLinear = 1
+    EaseEase = 2
+    EaseHold = 3
+
+  Keyframe* = object
+    ## One decoded ldat keyframe. Speeds and influences are per
+    ## dimension for multi-dimensional properties and single element
+    ## otherwise. Spatial tangents exist for position properties only.
+    time*: int ## raw u16 time units
+    ease*: KeyframeEase
+    labelColor*: int
+    continuousBezier*: bool
+    autoBezier*: bool
+    roving*: bool
+    values*: seq[float64] ## value floats, empty for no-value kind
+    inSpeed*: seq[float64]
+    inInfluence*: seq[float64]
+    outSpeed*: seq[float64]
+    outInfluence*: seq[float64]
+    tanIn*: seq[float64] ## spatial tangents, position only
+    tanOut*: seq[float64] ## spatial tangents, position only
+    extra*: seq[float64] ## trailing floats of unknown meaning (color: 8)
+
   AepLimits* = object
     ## Caps applied before allocating or recursing, so corrupt headers
     ## cannot force huge allocations. Violations raise AepError.
@@ -41,6 +68,7 @@ type
     maxNameBytes*: int ## longest name or match string kept
     maxPropsPerGroup*: int ## properties collected from one tdgp
     maxComponents*: int ## floats read from one cdat
+    maxKeyframes*: int ## keyframes decoded from one LIST list
 
   CompInfo* = object
     id*: uint32
@@ -83,11 +111,12 @@ type
     filePath*: string ## from alas JSON fullpath, empty when absent
 
   PropValue* = object
-    ## Decoded static value of one property. Animated properties are
-    ## marked and carry no values (keyframes are v3).
+    ## Decoded value of one property. Static properties carry values,
+    ## animated ones carry keyframes (v3, from LIST list lhd3/ldat).
     kind*: PropKind
     components*: int ## tdb4 component count
-    values*: seq[float64] ## first components floats of cdat
+    values*: seq[float64] ## first components floats of cdat, static only
+    keyframes*: seq[Keyframe] ## decoded keyframes, animated only
     hasLayerRef*: bool ## integer kind pointing at a layer
     layerIndex*: int ## from tdpi
     layerSource*: int ## from tdps (0 layer, -1 effects and masks, -2 masks)
@@ -106,10 +135,18 @@ type
     matchName*: string ## tdmn value, eg ADBE Position
     value*: PropValue
 
+  OrientationInfo* = object
+    ## Decoded LIST otst (orientation is not a plain tdbs property:
+    ## static triplet in cdat plus one otda triplet per otky entry).
+    matchName*: string ## tdmn value, eg ADBE Orientation
+    displayName*: string ## human name from tdsn, empty when absent
+    staticValue*: array[3, float64] ## first 3 floats of cdat
+    frames*: seq[array[3, float64]] ## one triplet per otda, timeless
+
 proc defaultAepLimits*(): AepLimits =
   AepLimits(maxChunks: 200_000, maxDepth: 64, maxItems: 10_000,
     maxLayers: 10_000, maxChunkBytes: 256_000_000, maxNameBytes: 4096,
-    maxPropsPerGroup: 10_000, maxComponents: 16)
+    maxPropsPerGroup: 10_000, maxComponents: 16, maxKeyframes: 50_000)
 
 proc itemKindFromU16*(v: uint16): ItemKind =
   case v
