@@ -167,18 +167,22 @@ import std/tables
 let prog = readFile("tests/data/fonts/cjk-cff-micro.otf")
 var sf = openShapedFont(prog)
 defer: close(sf)
+
 # CIDs key on shaped glyphs (ligatures, reordering), so the open
 # font travels with the use from the first call.
 var use = CidFontUse(fontBytes: prog, baseName: "NotoSansJP")
+
 # Lines shape through HarfBuzz and show as 2-byte Identity-H CIDs;
 # kern corrections land in the TJ array automatically.
 let content = drawCidLine(use, sf, 72.0, 720.0, "F3", 24.0, "日本語あAX")
 var b = newPdfBuilder()
+
 # finalizeFonts embeds a Type0 font (CIDFontType0/FontFile3 for CFF,
 # CIDFontType2/FontFile2 for TrueType) with /CIDToGIDMap, /W and
 # /ToUnicode, so our own reader round-trips the text unchanged.
 let fonts = b.finalizeFonts({"F3": use}.toTable)
 let cnum = b.addContentStream(content)
+
 discard b.addPage(612.0, 792.0, cnum, fontResources(fonts))
 writeFile("cid.pdf", b.buildPdf())
 ```
