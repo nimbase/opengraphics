@@ -7,3 +7,6 @@ for node in doc.layerTree():
   echo node.layer.displayName()
 doc.composite.savePpm("preview.ppm")
 doc.composite.saveImage("preview.jpg")
+# Re-render the layer stack (blend modes, opacity, clipping, masks)
+# instead of trusting the stored composite:
+renderDocument(doc).savePpm("render.ppm")

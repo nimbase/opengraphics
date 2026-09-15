@@ -35,7 +35,11 @@
   - Incremental saves: Append changes, preserve signatures
 - Read Adobe Photoshop `.psd` files
   - Headers, layers and group trees
-  - Raw and RLE pixels
+  - Raw, RLE and ZIP pixels (incl. ZIP prediction)
+  - Layer masks (`psd/mask`: rect, flags, -2 channel pixels, global mask)
+  - Layer-stack renderer (`psd/render`: 20 blend modes, opacity,
+    clipping, group opacity, mask application)
+  - `TySh` text engine data (text, fonts, sizes, transform)
   - Thumbnails, ICC profiles
 - Read Adobe Illustrator `.ai` files
   - modern PDF-based, v1: kind detection, artboards, XMP metadata
@@ -66,6 +70,23 @@ for node in doc.layerTree():
 # The flattened composite: PPM needs stdlib only, JPG needs libvips.
 doc.composite.savePpm("preview.ppm")
 doc.composite.saveImage("preview.jpg") # jpg/png/webp/tif/gif/heif/avif/jxl
+
+# Text layers (TySh): raw block stays preserved, parsed view is lazy.
+import std/options
+for l in doc.layers:
+  if l.isTextLayer():
+    let t = l.layerText().get()
+    echo l.displayName(), " -> ", t.displayText(), " ", t.fontNames
+
+# Layer masks: rect + flags parse at load, -2 channel holds the pixels.
+for l in doc.layers:
+  if l.hasMask():
+    echo l.displayName(), " mask ", l.maskWidth(), "x", l.maskHeight(),
+      " enabled=", l.maskEnabled(), " bytes=", l.maskData().len
+
+# Re-render the stack instead of trusting the stored composite
+# (blend modes, opacity, clipping, group opacity, masks).
+renderDocument(doc).savePpm("render.ppm")
 ```
 
 ### PDF Documents

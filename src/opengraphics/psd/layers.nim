@@ -1,13 +1,17 @@
 ## Layer and Mask Information section.
 ##
 ## v1 parses record structure, blend keys, names (ASCII + luni),
-## group dividers (lsct), and 8-bit Raw/RLE channel pixels.
+## group dividers (lsct), and 8-bit Raw/RLE/ZIP channel pixels.
 ## Everything else is preserved as raw bytes.
 
 import ./types
 import ./reader
 import ./rle
 import ./pixels
+import ./zip
+import ./mask
+
+export mask
 
 type
   LayerKind* {.pure.} = enum
@@ -38,6 +42,7 @@ type
     hasLayerId*: bool
     kind*: LayerKind
     maskRaw*: seq[byte]
+    mask*: LayerMask ## parsed view of maskRaw (hasMask false when absent)
     blendingRangesRaw*: seq[byte]
     extraBlocks*: seq[TaggedBlock]
     channelPixels*: seq[seq[byte]] # decoded bytes per channel, parallel to channels
@@ -47,6 +52,7 @@ type
     layers*: seq[Layer]
     hasMergedAlpha*: bool
     globalMaskRaw*: seq[byte]
+    globalMask*: GlobalMask ## parsed view of globalMaskRaw
     additional*: seq[TaggedBlock]
 
   LayerNode* = ref object
@@ -176,18 +182,70 @@ proc parseOneLayerRecord(r: var BinReader): Layer =
     channels: ch, blendKey: blendKey, opacity: opacity, clipping: clipping,
     flags: flags, name: name, unicodeName: unicodeName, layerId: layerId,
     hasLayerId: hasLayerId, kind: kind, maskRaw: maskRaw,
+    mask: parseLayerMask(maskRaw),
     blendingRangesRaw: blendingRangesRaw, extraBlocks: extraBlocks,
     channelPixels: @[], channelCompression: Raw)
 
 proc displayName*(l: Layer): string {.inline.} =
   if l.unicodeName.len > 0: l.unicodeName else: l.name
 
-proc skipChannelData(r: var BinReader, w, h: int) =
+proc channelDims(l: Layer, id: int16): tuple[w, h: int] =
+  ## Pixel and transparency channels are sized by the layer rect;
+  ## the user-mask channel (id -2) is sized by the mask rect instead
+  ## (libpsd channel_image.c: mask_channel_length for id -2, and the
+  ## RLE row counts run over the mask height). A -2 channel without
+  ## a parsed mask yields 0x0; its payload is then consumed via
+  ## dataLen so the stream stays aligned.
+  if id == -2:
+    (l.mask.maskWidth(), l.mask.maskHeight())
+  else:
+    (max(l.width(), 0), max(l.height(), 0))
+
+proc hasMask*(l: Layer): bool {.inline.} =
+  l.mask.hasMask
+
+proc maskEnabled*(l: Layer): bool {.inline.} =
+  ## A mask exists and is not flagged disabled.
+  l.mask.hasMask and not l.mask.disabled
+
+proc maskWidth*(l: Layer): int {.inline.} =
+  l.mask.maskWidth()
+
+proc maskHeight*(l: Layer): int {.inline.} =
+  l.mask.maskHeight()
+
+proc maskChannelIndex*(l: Layer): int =
+  ## Index into channels/channelPixels of the user-mask (-2) plane,
+  ## or -1 when the layer carries no mask channel.
+  for i, c in l.channels:
+    if c.id == -2:
+      return i
+  return -1
+
+proc maskData*(l: Layer): seq[byte] =
+  ## Decoded user-mask bytes (maskWidth*maskHeight, 0 = masked out,
+  ## 255 = fully visible), or empty when absent/undecoded.
+  let i = l.maskChannelIndex()
+  if i < 0 or i >= l.channelPixels.len:
+    return @[]
+  l.channelPixels[i]
+
+proc skipChannelData(r: var BinReader, w, h: int, dataLen = -1) =
   let comp = r.readU16BE()
+  if comp == 2 or comp == 3:
+    if dataLen < 2:
+      raise newException(PsdError,
+        "ZIP channel needs its data length to skip")
+    r.skip(int(dataLen) - 2)
+    return
   if comp != 0 and comp != 1:
     raise newException(PsdError,
-      "unsupported layer compression " & $comp & " (v1 supports Raw and RLE)")
+      "unsupported layer compression " & $comp & " (supports Raw, RLE and ZIP)")
   if w <= 0 or h <= 0:
+    # Degenerate rect (e.g. an empty mask): consume via dataLen so
+    # the stream stays aligned, then report nothing to skip.
+    if dataLen >= 2:
+      r.skip(int(dataLen) - 2)
     return
   if comp == 0:
     r.skip(w * h)
@@ -197,12 +255,24 @@ proc skipChannelData(r: var BinReader, w, h: int) =
       total += int(r.readU16BE())
     r.skip(total)
 
-proc decodeChannelData(r: var BinReader, w, h: int): seq[byte] =
+proc decodeChannelData(r: var BinReader, w, h: int,
+    dataLen = -1): seq[byte] =
   let comp = r.readU16BE()
+  if comp == 2 or comp == 3:
+    if dataLen < 2:
+      raise newException(PsdError,
+        "ZIP channel needs its data length to decode")
+    let payload = r.readBytes(int(dataLen) - 2)
+    if w <= 0 or h <= 0:
+      return @[]
+    return unzipChannel(payload, w, h, comp == 3)
   if comp != 0 and comp != 1:
     raise newException(PsdError,
-      "unsupported layer compression " & $comp & " (v1 supports Raw and RLE)")
+      "unsupported layer compression " & $comp & " (supports Raw, RLE and ZIP)")
   if w <= 0 or h <= 0:
+    # Degenerate rect (e.g. an empty mask): consume via dataLen.
+    if dataLen >= 2:
+      r.skip(int(dataLen) - 2)
     return @[]
   if comp == 0:
     return r.readBytes(w * h)
@@ -264,7 +334,7 @@ proc parseLayerInfo*(r: var BinReader, optsSkipImage: bool,
   let sectionLen = int(r.readU32BE())
   if sectionLen == 0:
     return LayerInfo(layers: @[], hasMergedAlpha: false,
-      globalMaskRaw: @[], additional: @[])
+      globalMaskRaw: @[], globalMask: GlobalMask(), additional: @[])
   let sectionEnd = r.pos + sectionLen
   if sectionEnd > r.data.len:
     raise newException(PsdError, "truncated layer and mask section")
@@ -288,24 +358,25 @@ proc parseLayerInfo*(r: var BinReader, optsSkipImage: bool,
       layers.add(parseOneLayerRecord(r))
     # channel image data, in same layer order
     for li in 0 ..< layers.len:
-      let w = layers[li].width()
-      let h = layers[li].height()
-      # Bound the allocation before touching channel bytes: each of the
-      # layer's channels decodes to w*h bytes.
-      if layers[li].channels.len > 0 and w > 0 and h > 0:
-        let total = int64(layers[li].channels.len) * int64(w) * int64(h)
-        if total > int64(limits.maxPixels):
-          raise newException(PsdError, "layer '" &
-            layers[li].displayName() & "' size " & $w & "x" & $h & "x" &
-            $layers[li].channels.len & "ch exceeds pixel limit " &
-            $limits.maxPixels)
+      # Bound the allocation before touching channel bytes. Pixel
+      # channels decode to layer w*h bytes each; the user-mask
+      # channel (id -2) decodes to mask w*h bytes instead.
+      var totalArea: int64 = 0
+      var dims: seq[tuple[w, h: int]] = newSeq[tuple[w, h: int]](
+        layers[li].channels.len)
+      for ci in 0 ..< layers[li].channels.len:
+        dims[ci] = channelDims(layers[li], layers[li].channels[ci].id)
+        totalArea += int64(dims[ci].w) * int64(dims[ci].h)
+      if totalArea > int64(limits.maxPixels):
+        raise newException(PsdError, "layer '" &
+          layers[li].displayName() & "' pixel area " & $totalArea &
+          " exceeds pixel limit " & $limits.maxPixels)
       var planes: seq[seq[byte]] = @[]
       var comp: Compression = Raw
       if optsSkipImage:
-        for _ in layers[li].channels:
-          let cw = if w < 0: 0 else: w
-          let chh = if h < 0: 0 else: h
-          skipChannelData(r, cw, chh)
+        for ci in 0 ..< layers[li].channels.len:
+          skipChannelData(r, dims[ci].w, dims[ci].h,
+            int(layers[li].channels[ci].dataLen))
           planes.add(@[])
         layers[li].channelPixels = planes
         layers[li].channelCompression = Raw
@@ -315,7 +386,8 @@ proc parseLayerInfo*(r: var BinReader, optsSkipImage: bool,
           let ccRaw = r.readU16BE()
           r.pos = save
           comp = compressionFromU16(ccRaw)
-          planes.add(decodeChannelData(r, max(w, 0), max(h, 0)))
+          planes.add(decodeChannelData(r, dims[ci].w, dims[ci].h,
+            int(layers[li].channels[ci].dataLen)))
         layers[li].channelPixels = planes
         layers[li].channelCompression = comp
   r.pos = layerInfoEnd
@@ -333,7 +405,8 @@ proc parseLayerInfo*(r: var BinReader, optsSkipImage: bool,
   if r.pos != sectionEnd:
     r.pos = sectionEnd
   result = LayerInfo(layers: layers, hasMergedAlpha: hasMergedAlpha,
-    globalMaskRaw: gRaw, additional: additional)
+    globalMaskRaw: gRaw, globalMask: parseGlobalMask(gRaw),
+    additional: additional)
 
 proc buildLayerTree*(layers: seq[Layer]): seq[LayerNode] =
   ## Nest flat file-order (bottom layer first) records into a hierarchy.

@@ -1,6 +1,6 @@
 ## Shared types and errors for the PSD reader.
 ##
-## v1 scope: PSD only (not PSB), 8-bit RGB/Grayscale, Raw + RLE.
+## v1 scope: PSD only (not PSB), 8-bit RGB/Grayscale, Raw + RLE + ZIP.
 ## Unknown sections are preserved as raw bytes so a future writer
 ## can round-trip them.
 
