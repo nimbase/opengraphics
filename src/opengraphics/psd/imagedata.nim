@@ -1,9 +1,10 @@
 ## Image Data section: the flattened composite in planar order
-## (all of channel 1, then channel 2, ...). v1: 8-bit, Raw + RLE.
+## (all of channel 1, then channel 2, ...). v1: 8-bit, Raw + RLE + ZIP.
 
 import ./types
 import ./reader
 import ./pixels
+import ./zip
 
 proc decodePlanarChannelRaw(r: var BinReader, w, h: int): seq[byte] =
   r.readBytes(w * h)
@@ -55,11 +56,21 @@ proc decodeComposite*(r: var BinReader, width, height, channels: int,
   let comp = compressionFromU16(compRaw)
   if width <= 0 or height <= 0:
     raise newException(PsdError, "invalid composite dimensions")
-  if comp != Raw and comp != Rle:
+  if comp != Raw and comp != Rle and comp != ZipNoPrediction and
+      comp != ZipPrediction:
     raise newException(PsdError,
-      "unsupported composite compression " & $compRaw & " (v1 supports Raw=0 and RLE=1)")
+      "unsupported composite compression " & $compRaw & " (supports Raw, RLE and ZIP)")
   var planes: seq[seq[byte]] = newSeq[seq[byte]](channels)
-  if comp == Raw:
+  if comp == ZipNoPrediction or comp == ZipPrediction:
+    let payloadStart = r.pos
+    let payload = r.data[payloadStart .. ^1]
+    let flat = inflateZlib(payload, width * height * channels)
+    for c in 0 ..< channels:
+      planes[c] = flat[c * width * height ..< (c + 1) * width * height]
+      if comp == ZipPrediction:
+        undoPrediction(planes[c], width, height)
+    r.pos = r.data.len
+  elif comp == Raw:
     for c in 0 ..< channels:
       planes[c] = r.readBytes(width * height)
   else:

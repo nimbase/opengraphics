@@ -6,9 +6,13 @@ import psd/header
 import psd/colormode
 import psd/resources
 import psd/rle
+import psd/zip
 import psd/pixels
 import psd/layers
+import psd/mask
 import psd/document
+import psd/render
+import psd/text
 import exporting
 
 export types
@@ -17,7 +21,11 @@ export header
 export colormode
 export resources
 export rle
+export zip
 export pixels
 export layers
+export mask
 export document
+export render
+export text
 export exporting
