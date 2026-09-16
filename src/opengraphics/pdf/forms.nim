@@ -16,6 +16,7 @@
 import std/sets
 import std/strutils
 import std/tables
+from std/unicode import `$`, runeLen, runes
 import ./types
 import ./cos
 import ./docmodel
@@ -655,7 +656,8 @@ proc finishWithAppearances(u: PdfUpdate): string =
   u2.finishUpdate()
 
 proc fillText*(base: string, name, text: string): string =
-  ## Set a text field's /V (truncated to /MaxLen); returns new bytes.
+  ## Set a text field's /V (truncated to /MaxLen characters); returns
+  ## new bytes.
   var donor = openDoc(base)
   donor.checkDonor()
   let f = donor.findRaw(name)
@@ -665,8 +667,14 @@ proc fillText*(base: string, name, text: string): string =
     pdfFail("field '" & name & "' is read-only")
   var v = text
   if f.inh.hasMaxLen and f.inh.maxLen >= 0 and
-      v.len > f.inh.maxLen:
-    v = v[0 ..< f.inh.maxLen]
+      v.runeLen > f.inh.maxLen:
+    v = ""
+    var n = 0
+    for r in text.runes:
+      if n >= f.inh.maxLen:
+        break
+      v.add($r)
+      inc n
   var u = beginUpdate(base)
   var bumped = initTable[int, int]()
   u.setFieldValue(donor, bumped, f, CosObj(kind: coStr, sval: v))
