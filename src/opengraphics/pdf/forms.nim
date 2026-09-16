@@ -53,26 +53,26 @@ type
     align*: int ## /Q quadding 0 left 1 center 2 right
     widgets*: seq[FieldWidget]
 
-  PathStep = tuple[isKey: bool, key: string, idx: int]
+  PathStep* = tuple[isKey: bool, key: string, idx: int]
 
-  Inh = object ## inherited attributes carried down the field tree
-    ft, v, dv, da, tu, opt: CosObj
-    ff, q, maxLen: int
-    hasFf, hasQ, hasMaxLen: bool
+  Inh* = object ## inherited attributes carried down the field tree
+    ft*, v*, dv*, da*, tu*, opt*: CosObj
+    ff*, q*, maxLen*: int
+    hasFf*, hasQ*, hasMaxLen*: bool
 
   RawWidget = object
     node: CosObj ## resolved widget dict
     refNum: int ## -1 when the widget is a direct dict
     fieldPath: seq[PathStep] ## steps from /AcroForm to the field node
 
-  RawField = object
-    node: CosObj
-    nodeRef: CosObj ## coRef or coNull
-    path: seq[PathStep] ## steps from /AcroForm to this node
-    fullName: string
-    inh: Inh
-    widgetRefs: seq[CosObj] ## kid refs/nodes that are widgets
-    selfWidget: bool ## the field node itself is a widget annot
+  RawField* = object
+    node*: CosObj
+    nodeRef*: CosObj ## coRef or coNull
+    path*: seq[PathStep] ## steps from /AcroForm to this node
+    fullName*: string
+    inh*: Inh
+    widgetRefs*: seq[CosObj] ## kid refs/nodes that are widgets
+    selfWidget*: bool ## the field node itself is a widget annot
 
 proc nullInh(): Inh =
   Inh(ft: CosObj(kind: coNull), v: CosObj(kind: coNull),
@@ -115,7 +115,7 @@ proc asText(o: CosObj): string =
   of coName: o.name
   else: pdfFail("field value must be a string or name")
 
-proc kindOf(inh: Inh): FieldKind =
+proc kindOf*(inh: Inh): FieldKind =
   if inh.ft.kind != coName:
     return fkUnknown
   case inh.ft.name
@@ -347,7 +347,7 @@ proc toField(f: RawField, placed: seq[FieldWidget]): FormField =
     align: if f.inh.hasQ: f.inh.q else: 0,
     widgets: placed)
 
-proc rawFields(d: var PdfDoc): seq[RawField] =
+proc rawFields*(d: var PdfDoc): seq[RawField] =
   result = @[]
   let cat = d.catalog()
   let acro = cat.dictGet("AcroForm")

@@ -79,6 +79,11 @@ export FieldKind, FieldOption, FieldWidget, FormField,
   formFields, fieldNames, getField, isChecked, fillText, setCheck,
   selectRadio, selectChoice, flattenFields
 
+from pdf/sign import DocSignature, SigDraft, docSignatures,
+  verifyByteRangeHash, addSignaturePlaceholder
+export DocSignature, SigDraft, docSignatures,
+  verifyByteRangeHash, addSignaturePlaceholder
+
 from exporting import ExportError, ImageFormat, ExportOptions, ExportPixels,
   encodeImage, saveImage, formatForPath, formatForExt
 export ExportError, ImageFormat, ExportOptions, ExportPixels,
