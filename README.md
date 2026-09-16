@@ -11,6 +11,9 @@
   <img src="https://github.com/nimbase/opengraphics/workflows/test/badge.svg" alt="Github Actions">  <img src="https://github.com/nimbase/opengraphics/workflows/docs/badge.svg" alt="Github Actions">
 </p>
 
+> [!NOTE]
+> opengraphics unifies popular graphics formats under a single API: one shared pixel model, the same open/read patterns for PSD, PDF, and AI, plus helpers to convert between formats.
+
 ## Features
 - High-quality 
 - PDF reader and Writer
@@ -38,13 +41,8 @@
 - Shared pixel model (`ImageBuf`) designed for conversion from one format to another
 - Unknown blocks preserved as raw bytes so future writers can round-trip files
 
-## Roadmap
-- Read support for `.eps`, `.aep`, and more
-- Writers for each supported format
-- Format-to-format conversion helpers
-- Building blocks for high-level libraries and apps compatible with popular graphics formats
-
-
+> [!NOTE]
+> Note here
 
 ## Prerequisites
 - System libraries with pkg-config files: `harfbuzz` (text shaping)
@@ -324,6 +322,12 @@ echo "kind: ", doc.kind, " pdf: ", doc.pdfVersion
 for ab in doc.artboards:
   echo "  [", ab.index, "] ", ab.width, "x", ab.height, "pt"
 ```
+
+## Roadmap
+- Read support for `.eps`, `.aep`, and more
+- Writers for each supported format
+- Format-to-format conversion helpers
+- Building blocks for high-level libraries and apps compatible with popular graphics formats
 
 ### References
 - https://github.com/TheNicker/libpsd
