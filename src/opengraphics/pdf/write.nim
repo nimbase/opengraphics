@@ -486,14 +486,15 @@ proc addObject*(u: var PdfUpdate, num, gen: int, body: string) =
     u.nextNum = num + 1
 
 proc updateObject*(u: var PdfUpdate, num: int, body: string): int =
-  ## New generation of an existing object: generation bumps one past
-  ## the base entry (or 0 when the base has no live entry). Returns
-  ## the generation used.
+  ## New revision of an existing object: the generation stays as in
+  ## the base entry (or 0 when the base has no live entry), so every
+  ## pre-existing "N G R" reference keeps resolving. The appended
+  ## entry supersedes via /Prev ordering. Returns the generation used.
   let src = fromString(u.base)
   let xr = parseXRef(src, u.limits)
   result = 0
   if xr.entries.hasKey(num) and xr.entries[num].live:
-    result = xr.entries[num].gen + 1
+    result = xr.entries[num].gen
   u.addObject(num, result, body)
 
 proc finishUpdate*(u: PdfUpdate): string =

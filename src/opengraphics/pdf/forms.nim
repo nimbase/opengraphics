@@ -7,8 +7,10 @@
 ## widget placements. `getField` fetches one by name, loudly.
 ##
 ## Fill stamps values through `PdfUpdate` (one appended section per
-## call; chain calls to fill several fields) and raises
-## /NeedAppearances so viewers regenerate appearances. `flattenFields`
+## call; chain calls to fill several fields), generates widget /AP
+## appearance streams (text/choice lines in the DA font, button
+## on/off states kept or drawn), and raises /NeedAppearances so
+## regenerating viewers stay correct too. `flattenFields`
 ## bakes text, checks, radios, and choices into page content, drops
 ## the widget annotations, and prunes the field tree. Signature and
 ## pushbutton fields are extracted but never filled or flattened.
@@ -466,15 +468,17 @@ proc isChecked*(f: FormField): bool =
 
 proc stageBody(u: var PdfUpdate, donor: var PdfDoc,
     bumped: var Table[int, int], num: int, body: string) =
-  ## Append one new generation of `num`. Each object stages at most
-  ## once per update (finishUpdate keys entries by number), so repeat
-  ## touches must merge first; repeats fail loudly here.
+  ## Append one new revision of `num`, keeping the base generation so
+  ## pre-existing references keep resolving (the appended entry wins
+  ## via /Prev). Each object stages at most once per update
+  ## (finishUpdate keys entries by number), so repeat touches must
+  ## merge first; repeats fail loudly here.
   if bumped.hasKey(num):
     pdfFail("internal error: object " & $num &
       " staged twice in one update")
   var gen = 0
   if donor.xref.entries.hasKey(num) and donor.xref.entries[num].live:
-    gen = donor.xref.entries[num].gen + 1
+    gen = donor.xref.entries[num].gen
   bumped[num] = gen
   u.addObject(num, gen, body)
 
@@ -613,8 +617,8 @@ proc checkDonor(donor: var PdfDoc) =
       "(file has /Encrypt)")
 
 proc setFieldValue(u: var PdfUpdate, donor: var PdfDoc,
-    bumped: var Table[int, int], f: RawField, val: CosObj,
-    drop: seq[string] = @[]) =
+    bumped: var Table[int, int], f: RawField, val, ap: CosObj,
+    drop: seq[string]) =
   var keys = f.node.keys
   var vals = f.node.vals
   var found = false
@@ -625,6 +629,8 @@ proc setFieldValue(u: var PdfUpdate, donor: var PdfDoc,
   if not found:
     keys.add("V")
     vals.add(val)
+  if ap.kind != coNull:
+    setDictKey(keys, vals, "AP", ap)
   var nkeys: seq[string] = @[]
   var nvals: seq[CosObj] = @[]
   for i, k in keys:
@@ -635,27 +641,32 @@ proc setFieldValue(u: var PdfUpdate, donor: var PdfDoc,
     CosObj(kind: coDict, keys: nkeys, vals: nvals), followRef = true)
 
 proc dropFieldKeys(u: var PdfUpdate, donor: var PdfDoc,
-    bumped: var Table[int, int], f: RawField, drop: seq[string]) =
-  ## Remove entries (e.g. cleared /V and /I) from a field dict.
+    bumped: var Table[int, int], f: RawField, ap: CosObj,
+    drop: seq[string]) =
+  ## Remove entries (e.g. cleared /V and /I) from a field dict,
+  ## folding a merged widget appearance in when given.
   var nkeys: seq[string] = @[]
   var nvals: seq[CosObj] = @[]
   for i, k in f.node.keys:
     if k notin drop:
       nkeys.add(k)
       nvals.add(f.node.vals[i])
+  if ap.kind != coNull:
+    setDictKey(nkeys, nvals, "AP", ap)
   u.updateDeep(donor, bumped, u.rootNum, acroPath(f.path),
     CosObj(kind: coDict, keys: nkeys, vals: nvals), followRef = true)
 
 proc stageChoiceValues(u: var PdfUpdate, donor: var PdfDoc,
     bumped: var Table[int, int], f: RawField,
-    pairs: seq[tuple[idx: int, value: string]]) =
+    pairs: seq[tuple[idx: int, value: string]], ap: CosObj) =
   ## Write a choice selection: none drops /V and /I, one stores a
-  ## plain string, several store /V plus sorted /I.
+  ## plain string, several store /V plus sorted /I. A merged widget
+  ## appearance folds in when given.
   if pairs.len == 0:
-    u.dropFieldKeys(donor, bumped, f, @["V", "I"])
+    u.dropFieldKeys(donor, bumped, f, ap, @["V", "I"])
   elif pairs.len == 1:
     u.setFieldValue(donor, bumped, f,
-      CosObj(kind: coStr, sval: pairs[0].value), @["I"])
+      CosObj(kind: coStr, sval: pairs[0].value), ap, @["I"])
   else:
     var vitems: seq[CosObj] = @[]
     var iitems: seq[CosObj] = @[]
@@ -668,6 +679,8 @@ proc stageChoiceValues(u: var PdfUpdate, donor: var PdfDoc,
       CosObj(kind: coArray, items: vitems))
     setDictKey(keys, vals, "I",
       CosObj(kind: coArray, items: iitems))
+    if ap.kind != coNull:
+      setDictKey(keys, vals, "AP", ap)
     u.updateDeep(donor, bumped, u.rootNum, acroPath(f.path),
       CosObj(kind: coDict, keys: keys, vals: vals), followRef = true)
 
@@ -689,45 +702,6 @@ proc radioHasOption(donor: var PdfDoc, f: RawField,
     if option == o.value or option == o.display:
       return true
   false
-
-proc flipRefWidget(u: var PdfUpdate, donor: var PdfDoc,
-    bumped: var Table[int, int], done: var HashSet[int],
-    pagePath: seq[PathStep], annotIdx, widgetNum: int, state: string) =
-  ## Flip one indirect widget's /AS, once per object per update.
-  if widgetNum in done:
-    return
-  var full = pagePath
-  full.add((isKey: true, key: "Annots", idx: 0))
-  full.add((isKey: false, key: "", idx: annotIdx))
-  full.add((isKey: true, key: "AS", idx: 0))
-  u.updateDeep(donor, bumped, u.rootNum, full,
-    CosObj(kind: coName, name: state))
-  done.incl(widgetNum)
-
-proc flipDirectWidgets(u: var PdfUpdate, donor: var PdfDoc,
-    bumped: var Table[int, int], pagePath: seq[PathStep],
-    flips: seq[tuple[idx: int, state: string]]) =
-  ## Flip several direct-dict widgets sharing one page in a single
-  ## Annots-array stage (one stage per object per update).
-  var ap = pagePath
-  ap.add((isKey: true, key: "Annots", idx: 0))
-  let (_, _, arrRef) = donor.navigate(u.rootNum, ap)
-  let arr = donor.resolve(arrRef)
-  if arr.kind != coArray:
-    pdfFail("page /Annots is not an array")
-  var items = arr.items
-  for fl in flips:
-    if fl.idx < 0 or fl.idx >= items.len:
-      pdfFail("widget index out of range")
-    if items[fl.idx].kind != coDict:
-      pdfFail("direct flip hit an indirect widget")
-    var wkeys = items[fl.idx].keys
-    var wvals = items[fl.idx].vals
-    setDictKey(wkeys, wvals, "AS",
-      CosObj(kind: coName, name: fl.state))
-    items[fl.idx] = CosObj(kind: coDict, keys: wkeys, vals: wvals)
-  u.updateDeep(donor, bumped, u.rootNum, ap,
-    CosObj(kind: coArray, items: items))
 
 proc widgetPositions(donor: var PdfDoc, f: RawField):
     seq[tuple[page: int, pagePath: seq[PathStep], annotIdx: int,
@@ -756,27 +730,251 @@ proc widgetPositions(donor: var PdfDoc, f: RawField):
             par.refNum == f.nodeRef.refNum:
           result.add((page, ppath, j, -1, a))
 
+# ---------------------------------------------------------------------------
+# Fill-time appearances: one /AP normal stream per text/choice widget
+# (DA font or builtin Helvetica, left-aligned, hard line breaks) plus
+# ensured on/off state streams for buttons. Viewers that honor
+# /NeedAppearances regenerate anyway; the streams serve consumers
+# that render widget appearances as-is. Comb fields keep
+# viewer-rendered appearances (no streams generated).
+# ---------------------------------------------------------------------------
+
+proc fontRef(s: string): string =
+  ## Content-stream font name serialization.
+  result = "/"
+  for c in s:
+    if c in {'A'..'Z', 'a'..'z', '0'..'9', '_', '-', '.', '+'}:
+      result.add(c)
+    else:
+      result.add('#')
+      result.add(toHex(ord(c), 2))
+
+proc fmtNum(v: float64): string =
+  writeCos(CosObj(kind: coFloat, fval: v))
+
+proc stampText(x, y, size: float64, font, text: string): string =
+  "q BT " & fontRef(font) & " " & fmtNum(size) & " Tf " & fmtNum(x) &
+    " " & fmtNum(y) & " Td " & writeStr(text) & " Tj ET Q\n"
+
+proc stampCheck(x1, y1, x2, y2: float64): string =
+  let w = x2 - x1
+  let h = y2 - y1
+  let lw = max(1.0, min(w, h) * 0.12)
+  "q " & fmtNum(lw) & " w 0 G " &
+    fmtNum(x1 + 0.22 * w) & " " & fmtNum(y1 + 0.45 * h) & " m " &
+    fmtNum(x1 + 0.45 * w) & " " & fmtNum(y1 + 0.22 * h) & " l " &
+    fmtNum(x1 + 0.78 * w) & " " & fmtNum(y1 + 0.78 * h) & " l S Q\n"
+
+proc stampDot(x1, y1, x2, y2: float64): string =
+  let cx = (x1 + x2) / 2.0
+  let cy = (y1 + y2) / 2.0
+  let r = min(x2 - x1, y2 - y1) * 0.3
+  let k = 0.5523 * r
+  "q 0 g " & fmtNum(cx + r) & " " & fmtNum(cy) & " m " &
+    fmtNum(cx + r) & " " & fmtNum(cy + k) & " " &
+    fmtNum(cx + k) & " " & fmtNum(cy + r) & " " &
+    fmtNum(cx) & " " & fmtNum(cy + r) & " c " &
+    fmtNum(cx - k) & " " & fmtNum(cy + r) & " " &
+    fmtNum(cx - r) & " " & fmtNum(cy + k) & " " &
+    fmtNum(cx - r) & " " & fmtNum(cy) & " c " &
+    fmtNum(cx - r) & " " & fmtNum(cy - k) & " " &
+    fmtNum(cx - k) & " " & fmtNum(cy - r) & " " &
+    fmtNum(cx) & " " & fmtNum(cy - r) & " c " &
+    fmtNum(cx + k) & " " & fmtNum(cy - r) & " " &
+    fmtNum(cx + r) & " " & fmtNum(cy - k) & " " &
+    fmtNum(cx + r) & " " & fmtNum(cy) & " c f Q\n"
+
+proc apFontSize(daSize, h: float64): float64 =
+  ## Flatten-consistent text size: the DA size (12 when absent or
+  ## zero) clamped to the widget height.
+  min(if daSize > 0.0: daSize else: 12.0, max(4.0, h * 0.7))
+
+proc fontInDict(d: CosObj, key: string): CosObj =
+  ## A /Font entry that is a reference or a dict, else coNull.
+  result = CosObj(kind: coNull)
+  if d.kind != coDict:
+    return
+  let fonts = d.dictGet("Font")
+  if fonts.kind != coDict:
+    return
+  let e = fonts.dictGet(key)
+  if e.kind in {coRef, coDict}:
+    result = e
+
+proc resolveApFont(u: PdfUpdate, donor: var PdfDoc,
+    pagePath: seq[PathStep], fontKey: string): CosObj =
+  ## The DA font for an appearance: page resources first, AcroForm
+  ## /DR second, builtin Helvetica inline when neither names it.
+  if fontKey.len > 0:
+    let (_, _, pageRef) = donor.navigate(u.rootNum, pagePath)
+    let page = donor.resolve(pageRef)
+    if page.kind == coDict:
+      let hit = fontInDict(donor.resolve(page.dictGet("Resources")),
+        fontKey)
+      if hit.kind != coNull:
+        return hit
+    let acro = donor.resolve(donor.catalog().dictGet("AcroForm"))
+    if acro.kind == coDict:
+      let hit = fontInDict(donor.resolve(acro.dictGet("DR")),
+        fontKey)
+      if hit.kind != coNull:
+        return hit
+  builtinFontDict()
+
+proc buildTextAp(u: var PdfUpdate, donor: var PdfDoc,
+    pagePath: seq[PathStep], w, h: float64, fontKey: string,
+    daSize: float64, text: string): int =
+  ## One Form XObject appearance: BBox-clipped text lines in widget
+  ## space. Returns the new stream object number.
+  let size = apFontSize(daSize, h)
+  var content = "q 0 0 " & fmtNum(w) & " " & fmtNum(h) & " re W n\n"
+  if text.len > 0:
+    var y = h - 2.0 - size
+    for line in text.replace("\r\n", "\n").replace("\r", "\n")
+        .splitLines():
+      content.add("BT " & fontRef(fontKey) & " " & fmtNum(size) &
+        " Tf 2 " & fmtNum(y) & " Td " & writeStr(line) & " Tj ET\n")
+      y -= size * 1.2
+  content.add("Q\n")
+  let fontObj = u.resolveApFont(donor, pagePath, fontKey)
+  let res = CosObj(kind: coDict, keys: @["Font"], vals: @[
+    CosObj(kind: coDict, keys: @[fontKey], vals: @[fontObj])])
+  let bbox = CosObj(kind: coArray, items: @[
+    CosObj(kind: coFloat, fval: 0.0), CosObj(kind: coFloat, fval: 0.0),
+    CosObj(kind: coFloat, fval: w), CosObj(kind: coFloat, fval: h)])
+  let sdict = CosObj(kind: coDict, keys: @["Type", "Subtype", "BBox",
+    "Resources", "Length"], vals: @[
+    CosObj(kind: coName, name: "XObject"),
+    CosObj(kind: coName, name: "Form"), bbox, res,
+    CosObj(kind: coInt, ival: content.len)])
+  u.addObject(writeCos(CosObj(kind: coStream, streamDict: sdict.keys,
+    streamVals: sdict.vals, raw: content)))
+
+proc buildButtonStateAp(u: var PdfUpdate, w, h: float64, on,
+    isRadio: bool): int =
+  ## One button state stream: tick or dot in widget space, empty when
+  ## off. Returns the new stream object number.
+  let content = if on:
+      if isRadio: stampDot(0.0, 0.0, w, h)
+      else: stampCheck(0.0, 0.0, w, h)
+    else: "q Q\n"
+  let bbox = CosObj(kind: coArray, items: @[
+    CosObj(kind: coFloat, fval: 0.0), CosObj(kind: coFloat, fval: 0.0),
+    CosObj(kind: coFloat, fval: w), CosObj(kind: coFloat, fval: h)])
+  let sdict = CosObj(kind: coDict, keys: @["Type", "Subtype", "BBox",
+    "Length"], vals: @[
+    CosObj(kind: coName, name: "XObject"),
+    CosObj(kind: coName, name: "Form"), bbox,
+    CosObj(kind: coInt, ival: content.len)])
+  u.addObject(writeCos(CosObj(kind: coStream, streamDict: sdict.keys,
+    streamVals: sdict.vals, raw: content)))
+
+proc ensureButtonAp(u: var PdfUpdate, widget: CosObj, w, h: float64,
+    state: string, isRadio: bool): CosObj =
+  ## A button /AP dict keeping existing state streams and generating
+  ## the ones missing for `state` and Off.
+  var names: seq[string] = @[]
+  var refs: seq[CosObj] = @[]
+  let ap = widget.dictGet("AP")
+  if ap.kind == coDict:
+    let n = ap.dictGet("N")
+    if n.kind == coDict:
+      for i, k in n.keys:
+        names.add(k)
+        refs.add(n.vals[i])
+  for s in [state, "Off"]:
+    if s notin names:
+      let num = u.buildButtonStateAp(w, h, s != "Off", isRadio)
+      names.add(s)
+      refs.add(CosObj(kind: coRef, refNum: num, refGen: 0))
+  CosObj(kind: coDict, keys: @["N"], vals: @[
+    CosObj(kind: coDict, keys: names, vals: refs)])
+
+proc attachTextAppearances(u: var PdfUpdate, donor: var PdfDoc,
+    bumped: var Table[int, int], f: RawField, text, fontKey: string,
+    daSize: float64): CosObj =
+  ## Build and attach one /AP normal stream per placed text/choice
+  ## widget (indirect widgets stage in place, direct ones fold into a
+  ## page Annots rebuild). Returns the /AP dict for a merged field
+  ## widget, else coNull. Comb fields generate nothing.
+  result = CosObj(kind: coNull)
+  if f.inh.hasFf and hasFlag(f.inh.ff, 24):
+    return
+  let fnum = if f.nodeRef.kind == coRef: f.nodeRef.refNum else: -1
+  var directByPage = initTable[int, seq[tuple[idx: int,
+    ap: CosObj]]]()
+  var directPath = initTable[int, seq[PathStep]]()
+  var done = initHashSet[int]()
+  for pos in donor.widgetPositions(f):
+    let r = readRect(pos.widget)
+    let w = r.x2 - r.x1
+    let h = r.y2 - r.y1
+    let num = u.buildTextAp(donor, pos.pagePath, w, h, fontKey,
+      daSize, text)
+    let ap = CosObj(kind: coDict, keys: @["N"], vals: @[
+      CosObj(kind: coRef, refNum: num, refGen: 0)])
+    if pos.refNum == fnum and fnum >= 0 and f.selfWidget:
+      result = ap
+    elif pos.refNum >= 0:
+      if pos.refNum in done:
+        continue
+      var wkeys = pos.widget.keys
+      var wvals = pos.widget.vals
+      setDictKey(wkeys, wvals, "AP", ap)
+      u.stageBody(donor, bumped, pos.refNum,
+        writeCos(CosObj(kind: coDict, keys: wkeys, vals: wvals)))
+      done.incl(pos.refNum)
+    else:
+      directPath[pos.page] = pos.pagePath
+      directByPage.mgetOrPut(pos.page, @[]).add((pos.annotIdx, ap))
+  for page, items in directByPage:
+    var ap = directPath[page]
+    ap.add((isKey: true, key: "Annots", idx: 0))
+    let (_, _, arrRef) = donor.navigate(u.rootNum, ap)
+    let arr = donor.resolve(arrRef)
+    if arr.kind != coArray:
+      pdfFail("page /Annots is not an array")
+    var elems = arr.items
+    for it in items:
+      if it.idx < 0 or it.idx >= elems.len:
+        pdfFail("widget index out of range")
+      if elems[it.idx].kind != coDict:
+        pdfFail("direct appearance hit an indirect widget")
+      var wkeys = elems[it.idx].keys
+      var wvals = elems[it.idx].vals
+      setDictKey(wkeys, wvals, "AP", it.ap)
+      elems[it.idx] = CosObj(kind: coDict, keys: wkeys, vals: wvals)
+    u.updateDeep(donor, bumped, u.rootNum, ap,
+      CosObj(kind: coArray, items: elems))
+
 proc stageButtonFill(u: var PdfUpdate, donor: var PdfDoc,
     bumped: var Table[int, int], f: RawField, fieldVal: CosObj,
     skipBare: bool, widgetState: proc(w: CosObj): string) =
   ## Shared button-fill tail: stage the field dict (/V, plus a merged
-  ## /AS when the field node doubles as a widget with appearance
-  ## evidence), then flip each placed widget. One stage per object.
+  ## /AS and ensured button appearances when the field node doubles
+  ## as a widget), then stage each placed widget dict with its /AS
+  ## flip and ensured appearances. One stage per object.
+  let isRadio = kindOf(f.inh) == fkRadio
   var done = initHashSet[int]()
   let positions = donor.widgetPositions(f)
   let fnum = if f.nodeRef.kind == coRef: f.nodeRef.refNum else: -1
   var mergedAs = ""
+  var mergedAp = CosObj(kind: coNull)
   for pos in positions:
     if pos.refNum == fnum and fnum >= 0 and
         (pos.widget.dictGet("AS").kind != coNull or
           pos.widget.dictGet("AP").kind != coNull):
       mergedAs = widgetState(pos.widget)
+      let r = readRect(pos.widget)
+      mergedAp = u.ensureButtonAp(pos.widget, r.x2 - r.x1,
+        r.y2 - r.y1, mergedAs, isRadio)
   var fkeys = f.node.keys
   var fvals = f.node.vals
   setDictKey(fkeys, fvals, "V", fieldVal)
   if mergedAs.len > 0:
     setDictKey(fkeys, fvals, "AS",
       CosObj(kind: coName, name: mergedAs))
+    setDictKey(fkeys, fvals, "AP", mergedAp)
   let newField = CosObj(kind: coDict, keys: fkeys, vals: fvals)
   if fnum >= 0:
     u.stageBody(donor, bumped, fnum, writeCos(newField))
@@ -784,23 +982,56 @@ proc stageButtonFill(u: var PdfUpdate, donor: var PdfDoc,
   else:
     u.updateDeep(donor, bumped, u.rootNum, acroPath(f.path), newField)
   var directByPage = initTable[int, seq[tuple[idx: int,
-      state: string]]]()
+    widget: CosObj]]]()
   var directPath = initTable[int, seq[PathStep]]()
   for pos in positions:
     if skipBare and pos.widget.dictGet("AS").kind == coNull and
         pos.widget.dictGet("AP").kind == coNull:
       continue
-    let st = widgetState(pos.widget)
     if pos.refNum >= 0:
       if pos.refNum == fnum and mergedAs.len > 0:
         continue
-      u.flipRefWidget(donor, bumped, done, pos.pagePath, pos.annotIdx,
-        pos.refNum, st)
+      if pos.refNum in done:
+        continue
+      let st = widgetState(pos.widget)
+      let r = readRect(pos.widget)
+      let ap = u.ensureButtonAp(pos.widget, r.x2 - r.x1, r.y2 - r.y1,
+        st, isRadio)
+      var wkeys = pos.widget.keys
+      var wvals = pos.widget.vals
+      setDictKey(wkeys, wvals, "AS", CosObj(kind: coName, name: st))
+      setDictKey(wkeys, wvals, "AP", ap)
+      u.stageBody(donor, bumped, pos.refNum,
+        writeCos(CosObj(kind: coDict, keys: wkeys, vals: wvals)))
+      done.incl(pos.refNum)
     else:
+      let st = widgetState(pos.widget)
+      let r = readRect(pos.widget)
+      let ap = u.ensureButtonAp(pos.widget, r.x2 - r.x1, r.y2 - r.y1,
+        st, isRadio)
+      var wkeys = pos.widget.keys
+      var wvals = pos.widget.vals
+      setDictKey(wkeys, wvals, "AS", CosObj(kind: coName, name: st))
+      setDictKey(wkeys, wvals, "AP", ap)
       directPath[pos.page] = pos.pagePath
-      directByPage.mgetOrPut(pos.page, @[]).add((pos.annotIdx, st))
-  for page, flips in directByPage:
-    u.flipDirectWidgets(donor, bumped, directPath[page], flips)
+      directByPage.mgetOrPut(pos.page, @[]).add((pos.annotIdx,
+        CosObj(kind: coDict, keys: wkeys, vals: wvals)))
+  for page, items in directByPage:
+    var ap = directPath[page]
+    ap.add((isKey: true, key: "Annots", idx: 0))
+    let (_, _, arrRef) = donor.navigate(u.rootNum, ap)
+    let arr = donor.resolve(arrRef)
+    if arr.kind != coArray:
+      pdfFail("page /Annots is not an array")
+    var elems = arr.items
+    for it in items:
+      if it.idx < 0 or it.idx >= elems.len:
+        pdfFail("widget index out of range")
+      if elems[it.idx].kind != coDict:
+        pdfFail("direct flip hit an indirect widget")
+      elems[it.idx] = it.widget
+    u.updateDeep(donor, bumped, u.rootNum, ap,
+      CosObj(kind: coArray, items: elems))
 
 proc finishWithAppearances(u: PdfUpdate): string =
   ## Finish the value stages, then flag /NeedAppearances in a second
@@ -815,8 +1046,8 @@ proc finishWithAppearances(u: PdfUpdate): string =
   u2.finishUpdate()
 
 proc fillText*(base: string, name, text: string): string =
-  ## Set a text field's /V (truncated to /MaxLen characters); returns
-  ## new bytes.
+  ## Set a text field's /V (truncated to /MaxLen characters) and
+  ## generate widget appearances; returns new bytes.
   var donor = openDoc(base)
   donor.checkDonor()
   let f = donor.findRaw(name)
@@ -834,9 +1065,17 @@ proc fillText*(base: string, name, text: string): string =
         break
       v.add($r)
       inc n
+  var daFont = ""
+  var daSize = -1.0
+  parseDa(f.inh.da, daFont, daSize)
+  if daFont.len == 0:
+    daFont = "Helv"
   var u = beginUpdate(base)
   var bumped = initTable[int, int]()
-  u.setFieldValue(donor, bumped, f, CosObj(kind: coStr, sval: v))
+  let mergedAp = u.attachTextAppearances(donor, bumped, f, v,
+    daFont, daSize)
+  u.setFieldValue(donor, bumped, f, CosObj(kind: coStr, sval: v),
+    mergedAp, @[])
   u.finishWithAppearances()
 
 proc setCheck*(base: string, name: string, checked: bool): string =
@@ -896,7 +1135,7 @@ proc selectRadio*(base: string, group, option: string): string =
 proc selectChoice*(base: string, name, option: string): string =
   ## Choose a dropdown/list-box option by display text or export
   ## value; /V stores the export value and any stale /I goes.
-  ## Editable combos take any text.
+  ## Widget appearances regenerate; editable combos take any text.
   var donor = openDoc(base)
   donor.checkDonor()
   let f = donor.findRaw(name)
@@ -921,10 +1160,17 @@ proc selectChoice*(base: string, name, option: string): string =
   if not matched:
     pdfFail("choice field '" & name & "' has no option '" &
       option & "'")
+  var daFont = ""
+  var daSize = -1.0
+  parseDa(f.inh.da, daFont, daSize)
+  if daFont.len == 0:
+    daFont = "Helv"
   var u = beginUpdate(base)
   var bumped = initTable[int, int]()
+  let mergedAp = u.attachTextAppearances(donor, bumped, f,
+    displayOf(opts, value), daFont, daSize)
   u.setFieldValue(donor, bumped, f, CosObj(kind: coStr, sval: value),
-    @["I"])
+    mergedAp, @["I"])
   u.finishWithAppearances()
 
 proc selectChoices*(base: string, name: string,
@@ -964,9 +1210,19 @@ proc selectChoices*(base: string, name: string,
       pdfFail("choice field '" & name & "' has no option '" &
         option & "'")
   pairs.sort()
+  var daFont = ""
+  var daSize = -1.0
+  parseDa(f.inh.da, daFont, daSize)
+  if daFont.len == 0:
+    daFont = "Helv"
+  var displays: seq[string] = @[]
+  for p in pairs:
+    displays.add(displayOf(opts, p.value))
   var u = beginUpdate(base)
   var bumped = initTable[int, int]()
-  u.stageChoiceValues(donor, bumped, f, pairs)
+  let mergedAp = u.attachTextAppearances(donor, bumped, f,
+    displays.join("\n"), daFont, daSize)
+  u.stageChoiceValues(donor, bumped, f, pairs, mergedAp)
   u.finishWithAppearances()
 
 proc resetFields*(base: string, names: seq[string] = @[]): string =
@@ -1007,11 +1263,20 @@ proc resetFields*(base: string, names: seq[string] = @[]): string =
       pdfFail("field '" & f.fullName & "' is read-only")
     case kindOf(f.inh)
     of fkText:
+      var daFont = ""
+      var daSize = -1.0
+      parseDa(f.inh.da, daFont, daSize)
+      if daFont.len == 0:
+        daFont = "Helv"
       if f.inh.dv.kind == coNull:
-        u.dropFieldKeys(donor, bumped, f, @["V"])
+        let mergedAp = u.attachTextAppearances(donor, bumped, f, "",
+          daFont, daSize)
+        u.dropFieldKeys(donor, bumped, f, mergedAp, @["V"])
       elif f.inh.dv.kind == coStr:
+        let mergedAp = u.attachTextAppearances(donor, bumped, f,
+          f.inh.dv.sval, daFont, daSize)
         u.setFieldValue(donor, bumped, f,
-          CosObj(kind: coStr, sval: f.inh.dv.sval))
+          CosObj(kind: coStr, sval: f.inh.dv.sval), mergedAp, @[])
       else:
         pdfFail("field '" & f.fullName & "' has a malformed default")
     of fkCheckbox:
@@ -1037,11 +1302,22 @@ proc resetFields*(base: string, names: seq[string] = @[]): string =
           let states = onStates(w)
           if option != "Off" and option in states: option else: "Off")
     of fkDropdown:
+      var daFont = ""
+      var daSize = -1.0
+      parseDa(f.inh.da, daFont, daSize)
+      if daFont.len == 0:
+        daFont = "Helv"
       if f.inh.dv.kind == coNull:
-        u.dropFieldKeys(donor, bumped, f, @["V", "I"])
+        let mergedAp = u.attachTextAppearances(donor, bumped, f, "",
+          daFont, daSize)
+        u.dropFieldKeys(donor, bumped, f, mergedAp, @["V", "I"])
       elif f.inh.dv.kind == coStr:
+        let mergedAp = u.attachTextAppearances(donor, bumped, f,
+          displayOf(parseOpt(f.inh.opt), f.inh.dv.sval), daFont,
+          daSize)
         u.setFieldValue(donor, bumped, f,
-          CosObj(kind: coStr, sval: f.inh.dv.sval), @["I"])
+          CosObj(kind: coStr, sval: f.inh.dv.sval), mergedAp,
+          @["I"])
       else:
         pdfFail("field '" & f.fullName & "' has a malformed default")
     of fkListBox:
@@ -1070,7 +1346,17 @@ proc resetFields*(base: string, names: seq[string] = @[]): string =
       if pairs.len > 1 and not (f.inh.hasFf and hasFlag(f.inh.ff, 21)):
         pdfFail("field '" & f.fullName & "' has a malformed default")
       pairs.sort()
-      u.stageChoiceValues(donor, bumped, f, pairs)
+      var daFont = ""
+      var daSize = -1.0
+      parseDa(f.inh.da, daFont, daSize)
+      if daFont.len == 0:
+        daFont = "Helv"
+      var displays: seq[string] = @[]
+      for p in pairs:
+        displays.add(displayOf(opts, p.value))
+      let mergedAp = u.attachTextAppearances(donor, bumped, f,
+        displays.join("\n"), daFont, daSize)
+      u.stageChoiceValues(donor, bumped, f, pairs, mergedAp)
     else:
       pdfFail("field '" & f.fullName & "' cannot be reset")
   u.finishWithAppearances()
@@ -1078,51 +1364,6 @@ proc resetFields*(base: string, names: seq[string] = @[]): string =
 # ---------------------------------------------------------------------------
 # Flatten: bake values into page content, drop widgets, prune the tree
 # ---------------------------------------------------------------------------
-
-proc fontRef(s: string): string =
-  ## Content-stream font name serialization.
-  result = "/"
-  for c in s:
-    if c in {'A'..'Z', 'a'..'z', '0'..'9', '_', '-', '.', '+'}:
-      result.add(c)
-    else:
-      result.add('#')
-      result.add(toHex(ord(c), 2))
-
-proc fmtNum(v: float64): string =
-  writeCos(CosObj(kind: coFloat, fval: v))
-
-proc stampText(x, y, size: float64, font, text: string): string =
-  "q BT " & fontRef(font) & " " & fmtNum(size) & " Tf " & fmtNum(x) &
-    " " & fmtNum(y) & " Td " & writeStr(text) & " Tj ET Q\n"
-
-proc stampCheck(x1, y1, x2, y2: float64): string =
-  let w = x2 - x1
-  let h = y2 - y1
-  let lw = max(1.0, min(w, h) * 0.12)
-  "q " & fmtNum(lw) & " w 0 G " &
-    fmtNum(x1 + 0.22 * w) & " " & fmtNum(y1 + 0.45 * h) & " m " &
-    fmtNum(x1 + 0.45 * w) & " " & fmtNum(y1 + 0.22 * h) & " l " &
-    fmtNum(x1 + 0.78 * w) & " " & fmtNum(y1 + 0.78 * h) & " l S Q\n"
-
-proc stampDot(x1, y1, x2, y2: float64): string =
-  let cx = (x1 + x2) / 2.0
-  let cy = (y1 + y2) / 2.0
-  let r = min(x2 - x1, y2 - y1) * 0.3
-  let k = 0.5523 * r
-  "q 0 g " & fmtNum(cx + r) & " " & fmtNum(cy) & " m " &
-    fmtNum(cx + r) & " " & fmtNum(cy + k) & " " &
-    fmtNum(cx + k) & " " & fmtNum(cy + r) & " " &
-    fmtNum(cx) & " " & fmtNum(cy + r) & " c " &
-    fmtNum(cx - k) & " " & fmtNum(cy + r) & " " &
-    fmtNum(cx - r) & " " & fmtNum(cy + k) & " " &
-    fmtNum(cx - r) & " " & fmtNum(cy) & " c " &
-    fmtNum(cx - r) & " " & fmtNum(cy - k) & " " &
-    fmtNum(cx - k) & " " & fmtNum(cy - r) & " " &
-    fmtNum(cx) & " " & fmtNum(cy - r) & " c " &
-    fmtNum(cx + k) & " " & fmtNum(cy - r) & " " &
-    fmtNum(cx + r) & " " & fmtNum(cy - k) & " " &
-    fmtNum(cx + r) & " " & fmtNum(cy) & " c f Q\n"
 
 proc flattenFields*(base: string, only: seq[string] = @[]): string =
   ## Bake fillable fields into page content and remove their widgets
