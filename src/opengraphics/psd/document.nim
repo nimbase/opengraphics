@@ -56,8 +56,8 @@ proc readPsdBytes*(data: seq[byte], opts = ReadOptions(),
   if hdr.colorMode != Rgb and hdr.colorMode != Grayscale:
     raise newException(PsdError,
       "unsupported color mode " & $hdr.colorMode & " (v1 supports RGB and Grayscale)")
-  let cdata = parseColorModeData(r)
-  var res = parseResources(r)
+  let cdata = parseColorModeData(r, limits)
+  var res = parseResources(r, limits)
   if opts.skipThumbnail:
     for b in res.blocks.mitems:
       if b.id == ThumbnailRgbId or b.id == ThumbnailBgrId:
@@ -70,7 +70,8 @@ proc readPsdBytes*(data: seq[byte], opts = ReadOptions(),
     if not r.atEnd():
       limits.checkDimensions(hdr.width, hdr.height, "composite")
       let isRgb = hdr.colorMode == Rgb
-      let decoded = decodeComposite(r, hdr.width, hdr.height, hdr.channels, isRgb)
+      let decoded = decodeComposite(r, hdr.width, hdr.height, hdr.channels,
+        isRgb, limits)
       img = decoded.img
       comp = decoded.compression
       hasComp = true

@@ -101,14 +101,19 @@ proc parseDividerType(data: seq[byte]): int =
   var r = initReader(data)
   result = int(r.readU32BE())
 
-proc parseTaggedBlocks(r: var BinReader, stop: int): seq[TaggedBlock] =
+proc parseTaggedBlocks(r: var BinReader, stop: int,
+    limits: Limits): seq[TaggedBlock] =
   result = @[]
   while r.pos + 12 <= stop:
+    if result.len >= limits.maxBlocks:
+      raise newException(PsdError, "tagged block count exceeds limit " &
+        $limits.maxBlocks)
     let sig = r.readStr(4)
     if sig != "8BIM" and sig != "8B64":
       raise newException(PsdError, "bad layer info signature at " & $(r.pos - 4))
     let key = r.readStr(4)
     let n = int(r.readU32BE())
+    limits.checkSection(n, "tagged block '" & key & "'")
     let data = r.readBytes(n)
     if n mod 2 != 0:
       # data padded to even size
@@ -116,7 +121,7 @@ proc parseTaggedBlocks(r: var BinReader, stop: int): seq[TaggedBlock] =
         r.skip(1)
     result.add(TaggedBlock(signature: sig, key: key, data: data))
 
-proc parseOneLayerRecord(r: var BinReader): Layer =
+proc parseOneLayerRecord(r: var BinReader, limits: Limits): Layer =
   let top = r.readI32BE()
   let left = r.readI32BE()
   let bottom = r.readI32BE()
@@ -136,19 +141,22 @@ proc parseOneLayerRecord(r: var BinReader): Layer =
   let flags = r.readU8()
   discard r.readU8() # filler
   let extraLen = int(r.readU32BE())
+  limits.checkSection(extraLen, "layer extra data")
   let extraEnd = r.pos + extraLen
   if extraEnd > r.data.len:
     raise newException(PsdError, "truncated layer extra data")
   # mask data
   let maskLen = int(r.readU32BE())
+  limits.checkSection(maskLen, "layer mask data")
   let maskRaw = r.readBytes(maskLen)
   # blending ranges
   let blendLen = int(r.readU32BE())
+  limits.checkSection(blendLen, "layer blending ranges")
   let blendingRangesRaw = r.readBytes(blendLen)
   # name, pascal padded to multiple of 4
   let name = r.readPascalStringPad4()
   # tagged blocks filling the rest of extra
-  let extraBlocks = parseTaggedBlocks(r, extraEnd)
+  let extraBlocks = parseTaggedBlocks(r, extraEnd, limits)
   if r.pos != extraEnd:
     # tolerate gap by skipping (future-proof)
     r.pos = extraEnd
@@ -188,6 +196,13 @@ proc parseOneLayerRecord(r: var BinReader): Layer =
 
 proc displayName*(l: Layer): string {.inline.} =
   if l.unicodeName.len > 0: l.unicodeName else: l.name
+
+proc findBlock*(blocks: openarray[TaggedBlock], key: string): int =
+  ## Index of the first tagged block with `key`, or -1.
+  for i, b in blocks:
+    if b.key == key:
+      return i
+  -1
 
 proc channelDims(l: Layer, id: int16): tuple[w, h: int] =
   ## Pixel and transparency channels are sized by the layer rect;
@@ -332,6 +347,7 @@ proc layerPixelsToImage*(l: Layer): ImageBuf =
 proc parseLayerInfo*(r: var BinReader, optsSkipImage: bool,
     limits = defaultLimits()): LayerInfo =
   let sectionLen = int(r.readU32BE())
+  limits.checkSection(sectionLen, "layer and mask section")
   if sectionLen == 0:
     return LayerInfo(layers: @[], hasMergedAlpha: false,
       globalMaskRaw: @[], globalMask: GlobalMask(), additional: @[])
@@ -340,6 +356,7 @@ proc parseLayerInfo*(r: var BinReader, optsSkipImage: bool,
     raise newException(PsdError, "truncated layer and mask section")
   # --- layer info sub-section
   let layerInfoLen = int(r.readU32BE())
+  limits.checkSection(layerInfoLen, "layer info")
   let layerInfoEnd = r.pos + layerInfoLen
   if layerInfoEnd > sectionEnd:
     raise newException(PsdError, "bad layer info length")
@@ -355,7 +372,7 @@ proc parseLayerInfo*(r: var BinReader, optsSkipImage: bool,
       raise newException(PsdError, "layer count " & $count &
         " exceeds limit " & $limits.maxLayers)
     for _ in 0 ..< count:
-      layers.add(parseOneLayerRecord(r))
+      layers.add(parseOneLayerRecord(r, limits))
     # channel image data, in same layer order
     for li in 0 ..< layers.len:
       # Bound the allocation before touching channel bytes. Pixel
@@ -395,13 +412,14 @@ proc parseLayerInfo*(r: var BinReader, optsSkipImage: bool,
   if r.pos + 4 > sectionEnd:
     raise newException(PsdError, "truncated global mask length")
   let gLen = int(r.readU32BE())
+  limits.checkSection(gLen, "global mask")
   var gRaw: seq[byte] = @[]
   if gLen > 0:
     gRaw = r.readBytes(gLen)
   # --- additional tagged blocks to end of section
   var additional: seq[TaggedBlock] = @[]
   if r.pos < sectionEnd:
-    additional = parseTaggedBlocks(r, sectionEnd)
+    additional = parseTaggedBlocks(r, sectionEnd, limits)
   if r.pos != sectionEnd:
     r.pos = sectionEnd
   result = LayerInfo(layers: layers, hasMergedAlpha: hasMergedAlpha,

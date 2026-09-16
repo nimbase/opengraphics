@@ -51,11 +51,17 @@ proc decodePlanarChannelRle(data: seq[byte], pos: var int,
       result.add(b)
 
 proc decodeComposite*(r: var BinReader, width, height, channels: int,
-    isGrayscaleOrRgb: bool): tuple[img: ImageBuf, compression: Compression] =
+    isGrayscaleOrRgb: bool,
+    limits = defaultLimits()): tuple[img: ImageBuf, compression: Compression] =
   let compRaw = r.readU16BE()
   let comp = compressionFromU16(compRaw)
   if width <= 0 or height <= 0:
     raise newException(PsdError, "invalid composite dimensions")
+  limits.checkSamples(width, height, channels, "composite")
+  if r.data.len - r.pos > limits.maxSectionBytes:
+    raise newException(PsdError, "composite remainder " &
+      $(r.data.len - r.pos) & " bytes exceeds section limit " &
+      $limits.maxSectionBytes)
   if comp != Raw and comp != Rle and comp != ZipNoPrediction and
       comp != ZipPrediction:
     raise newException(PsdError,
