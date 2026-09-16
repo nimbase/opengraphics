@@ -380,7 +380,11 @@ for ab in doc.artboards:
   echo "  [", ab.index, "] ", ab.width, "x", ab.height, "pt"
 ```
 
-**Source for PDFs samples:** https://github.com/EbookFoundation/free-programming-books/
+### References
+- https://github.com/TheNicker/libpsd
+- https://github.com/forticheprod/py-aep
+- https://github.com/boltframe/aftereffects-aep-parser
+- https://github.com/EbookFoundation/free-programming-books/
 
 ### ❤ Contributions & Support
 - 🐛 Found a bug? [Create a new Issue](https://github.com/nimbase/opengraphics/issues)
