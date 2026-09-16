@@ -15,7 +15,8 @@
 > opengraphics unifies popular graphics formats under a single API: one shared pixel model, the same open/read patterns for PSD, PDF, and AI, plus helpers to convert between formats.
 
 ## Features
-- High-quality 
+- Read & Write `.pdf`, `.psd`, `.ai`, `.eps`, `.aep` programatically
+- Unlocks creation of high-level libraries, services, and desktop/mobile applications
 - PDF reader and Writer
   - Encryption RC4, AES-128, AES-256 (R2-R6)
   - Digital Signatures PAdES B-B, B-T, B-LT, B-LTA
