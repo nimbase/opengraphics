@@ -646,6 +646,50 @@ proc dropFieldKeys(u: var PdfUpdate, donor: var PdfDoc,
   u.updateDeep(donor, bumped, u.rootNum, acroPath(f.path),
     CosObj(kind: coDict, keys: nkeys, vals: nvals), followRef = true)
 
+proc stageChoiceValues(u: var PdfUpdate, donor: var PdfDoc,
+    bumped: var Table[int, int], f: RawField,
+    pairs: seq[tuple[idx: int, value: string]]) =
+  ## Write a choice selection: none drops /V and /I, one stores a
+  ## plain string, several store /V plus sorted /I.
+  if pairs.len == 0:
+    u.dropFieldKeys(donor, bumped, f, @["V", "I"])
+  elif pairs.len == 1:
+    u.setFieldValue(donor, bumped, f,
+      CosObj(kind: coStr, sval: pairs[0].value), @["I"])
+  else:
+    var vitems: seq[CosObj] = @[]
+    var iitems: seq[CosObj] = @[]
+    for p in pairs:
+      vitems.add(CosObj(kind: coStr, sval: p.value))
+      iitems.add(CosObj(kind: coInt, ival: p.idx))
+    var keys = f.node.keys
+    var vals = f.node.vals
+    setDictKey(keys, vals, "V",
+      CosObj(kind: coArray, items: vitems))
+    setDictKey(keys, vals, "I",
+      CosObj(kind: coArray, items: iitems))
+    u.updateDeep(donor, bumped, u.rootNum, acroPath(f.path),
+      CosObj(kind: coDict, keys: keys, vals: vals), followRef = true)
+
+proc radioHasOption(donor: var PdfDoc, f: RawField,
+    option: string): bool =
+  ## A radio option exists as a widget on-state or /Opt export value
+  ## (Off always counts).
+  if option == "Off":
+    return true
+  var dicts: seq[CosObj] = @[]
+  if f.selfWidget:
+    dicts.add(f.node)
+  for k in f.widgetRefs:
+    dicts.add(donor.resolve(k))
+  for wd in dicts:
+    if option in onStates(wd):
+      return true
+  for o in parseOpt(f.inh.opt):
+    if option == o.value or option == o.display:
+      return true
+  false
+
 proc flipRefWidget(u: var PdfUpdate, donor: var PdfDoc,
     bumped: var Table[int, int], done: var HashSet[int],
     pagePath: seq[PathStep], annotIdx, widgetNum: int, state: string) =
@@ -712,6 +756,52 @@ proc widgetPositions(donor: var PdfDoc, f: RawField):
             par.refNum == f.nodeRef.refNum:
           result.add((page, ppath, j, -1, a))
 
+proc stageButtonFill(u: var PdfUpdate, donor: var PdfDoc,
+    bumped: var Table[int, int], f: RawField, fieldVal: CosObj,
+    skipBare: bool, widgetState: proc(w: CosObj): string) =
+  ## Shared button-fill tail: stage the field dict (/V, plus a merged
+  ## /AS when the field node doubles as a widget with appearance
+  ## evidence), then flip each placed widget. One stage per object.
+  var done = initHashSet[int]()
+  let positions = donor.widgetPositions(f)
+  let fnum = if f.nodeRef.kind == coRef: f.nodeRef.refNum else: -1
+  var mergedAs = ""
+  for pos in positions:
+    if pos.refNum == fnum and fnum >= 0 and
+        (pos.widget.dictGet("AS").kind != coNull or
+          pos.widget.dictGet("AP").kind != coNull):
+      mergedAs = widgetState(pos.widget)
+  var fkeys = f.node.keys
+  var fvals = f.node.vals
+  setDictKey(fkeys, fvals, "V", fieldVal)
+  if mergedAs.len > 0:
+    setDictKey(fkeys, fvals, "AS",
+      CosObj(kind: coName, name: mergedAs))
+  let newField = CosObj(kind: coDict, keys: fkeys, vals: fvals)
+  if fnum >= 0:
+    u.stageBody(donor, bumped, fnum, writeCos(newField))
+    done.incl(fnum)
+  else:
+    u.updateDeep(donor, bumped, u.rootNum, acroPath(f.path), newField)
+  var directByPage = initTable[int, seq[tuple[idx: int,
+      state: string]]]()
+  var directPath = initTable[int, seq[PathStep]]()
+  for pos in positions:
+    if skipBare and pos.widget.dictGet("AS").kind == coNull and
+        pos.widget.dictGet("AP").kind == coNull:
+      continue
+    let st = widgetState(pos.widget)
+    if pos.refNum >= 0:
+      if pos.refNum == fnum and mergedAs.len > 0:
+        continue
+      u.flipRefWidget(donor, bumped, done, pos.pagePath, pos.annotIdx,
+        pos.refNum, st)
+    else:
+      directPath[pos.page] = pos.pagePath
+      directByPage.mgetOrPut(pos.page, @[]).add((pos.annotIdx, st))
+  for page, flips in directByPage:
+    u.flipDirectWidgets(donor, bumped, directPath[page], flips)
+
 proc finishWithAppearances(u: PdfUpdate): string =
   ## Finish the value stages, then flag /NeedAppearances in a second
   ## section. Two phases because every stage derives from the base
@@ -771,44 +861,9 @@ proc setCheck*(base: string, name: string, checked: bool): string =
   let state = if checked: on else: "Off"
   var u = beginUpdate(base)
   var bumped = initTable[int, int]()
-  var done = initHashSet[int]()
-  let positions = donor.widgetPositions(f)
-  let fnum = if f.nodeRef.kind == coRef: f.nodeRef.refNum else: -1
-  # A displayed merged field+widget takes /V and /AS in one stage.
-  var mergedAs = false
-  for pos in positions:
-    if pos.refNum == fnum and fnum >= 0 and
-        (pos.widget.dictGet("AS").kind != coNull or
-          pos.widget.dictGet("AP").kind != coNull):
-      mergedAs = true
-  var fkeys = f.node.keys
-  var fvals = f.node.vals
-  setDictKey(fkeys, fvals, "V", CosObj(kind: coName, name: state))
-  if mergedAs:
-    setDictKey(fkeys, fvals, "AS", CosObj(kind: coName, name: state))
-  let newField = CosObj(kind: coDict, keys: fkeys, vals: fvals)
-  if fnum >= 0:
-    u.stageBody(donor, bumped, fnum, writeCos(newField))
-    done.incl(fnum)
-  else:
-    u.updateDeep(donor, bumped, u.rootNum, acroPath(f.path), newField)
-  var directByPage = initTable[int, seq[tuple[idx: int,
-      state: string]]]()
-  var directPath = initTable[int, seq[PathStep]]()
-  for pos in positions:
-    if pos.widget.dictGet("AS").kind == coNull and
-        pos.widget.dictGet("AP").kind == coNull:
-      continue
-    if pos.refNum >= 0:
-      if pos.refNum == fnum and mergedAs:
-        continue
-      u.flipRefWidget(donor, bumped, done, pos.pagePath, pos.annotIdx,
-        pos.refNum, state)
-    else:
-      directPath[pos.page] = pos.pagePath
-      directByPage.mgetOrPut(pos.page, @[]).add((pos.annotIdx, state))
-  for page, flips in directByPage:
-    u.flipDirectWidgets(donor, bumped, directPath[page], flips)
+  u.stageButtonFill(donor, bumped, f,
+    CosObj(kind: coName, name: state), true,
+    proc(w: CosObj): string = state)
   u.finishWithAppearances()
 
 proc selectRadio*(base: string, group, option: string): string =
@@ -826,65 +881,16 @@ proc selectRadio*(base: string, group, option: string): string =
       hasFlag(f.inh.ff, 14):
     pdfFail("radio group '" & group & "' cannot toggle off")
   # option must be a known on-state (or Off)
-  var known = option == "Off"
-  var dicts: seq[CosObj] = @[]
-  if f.selfWidget:
-    dicts.add(f.node)
-  for k in f.widgetRefs:
-    dicts.add(donor.resolve(k))
-  for wd in dicts:
-    if option in onStates(wd):
-      known = true
-  if not known:
-    # /Opt export values also select
-    for o in parseOpt(f.inh.opt):
-      if option == o.value or option == o.display:
-        known = true
-  if not known:
+  if not donor.radioHasOption(f, option):
     pdfFail("radio group '" & group & "' has no option '" & option &
       "'")
   var u = beginUpdate(base)
   var bumped = initTable[int, int]()
-  var done = initHashSet[int]()
-  let positions = donor.widgetPositions(f)
-  let fnum = if f.nodeRef.kind == coRef: f.nodeRef.refNum else: -1
-  var mergedAs = false
-  var mergedState = "Off"
-  for pos in positions:
-    if pos.refNum == fnum and fnum >= 0:
-      let states = onStates(pos.widget)
-      mergedState = if option != "Off" and option in states: option
-        else: "Off"
-      mergedAs = true
-  var fkeys = f.node.keys
-  var fvals = f.node.vals
-  setDictKey(fkeys, fvals, "V", CosObj(kind: coName, name: option))
-  if mergedAs:
-    setDictKey(fkeys, fvals, "AS",
-      CosObj(kind: coName, name: mergedState))
-  let newField = CosObj(kind: coDict, keys: fkeys, vals: fvals)
-  if fnum >= 0:
-    u.stageBody(donor, bumped, fnum, writeCos(newField))
-    done.incl(fnum)
-  else:
-    u.updateDeep(donor, bumped, u.rootNum, acroPath(f.path), newField)
-  var directByPage = initTable[int, seq[tuple[idx: int,
-      state: string]]]()
-  var directPath = initTable[int, seq[PathStep]]()
-  for pos in positions:
-    let states = onStates(pos.widget)
-    let st = if option != "Off" and option in states: option
-      else: "Off"
-    if pos.refNum >= 0:
-      if pos.refNum == fnum and mergedAs:
-        continue
-      u.flipRefWidget(donor, bumped, done, pos.pagePath, pos.annotIdx,
-        pos.refNum, st)
-    else:
-      directPath[pos.page] = pos.pagePath
-      directByPage.mgetOrPut(pos.page, @[]).add((pos.annotIdx, st))
-  for page, flips in directByPage:
-    u.flipDirectWidgets(donor, bumped, directPath[page], flips)
+  u.stageButtonFill(donor, bumped, f,
+    CosObj(kind: coName, name: option), false,
+    proc(w: CosObj): string =
+      let states = onStates(w)
+      if option != "Off" and option in states: option else: "Off")
   u.finishWithAppearances()
 
 proc selectChoice*(base: string, name, option: string): string =
@@ -960,25 +966,113 @@ proc selectChoices*(base: string, name: string,
   pairs.sort()
   var u = beginUpdate(base)
   var bumped = initTable[int, int]()
-  if pairs.len == 0:
-    u.dropFieldKeys(donor, bumped, f, @["V", "I"])
-  elif pairs.len == 1:
-    u.setFieldValue(donor, bumped, f,
-      CosObj(kind: coStr, sval: pairs[0].value), @["I"])
+  u.stageChoiceValues(donor, bumped, f, pairs)
+  u.finishWithAppearances()
+
+proc resetFields*(base: string, names: seq[string] = @[]): string =
+  ## Reset fields to their /DV defaults (/V deleted when a field has
+  ## none; /I follows /V out). Empty names resets every writable
+  ## fillable field in one update; signature, pushbutton, unknown, and
+  ## read-only fields fail when named and pass quietly otherwise.
+  ## Malformed defaults always fail loudly.
+  const fillable = {fkText, fkCheckbox, fkRadio, fkDropdown,
+    fkListBox}
+  var donor = openDoc(base)
+  donor.checkDonor()
+  let raw = donor.rawFields()
+  var targets: seq[int] = @[]
+  if names.len == 0:
+    for i, f in raw:
+      if f.fullName.len == 0:
+        continue
+      if kindOf(f.inh) in fillable and
+          not (f.inh.hasFf and hasFlag(f.inh.ff, 0)):
+        targets.add(i)
   else:
-    var vitems: seq[CosObj] = @[]
-    var iitems: seq[CosObj] = @[]
-    for p in pairs:
-      vitems.add(CosObj(kind: coStr, sval: p.value))
-      iitems.add(CosObj(kind: coInt, ival: p.idx))
-    var keys = f.node.keys
-    var vals = f.node.vals
-    setDictKey(keys, vals, "V",
-      CosObj(kind: coArray, items: vitems))
-    setDictKey(keys, vals, "I",
-      CosObj(kind: coArray, items: iitems))
-    u.updateDeep(donor, bumped, u.rootNum, acroPath(f.path),
-      CosObj(kind: coDict, keys: keys, vals: vals), followRef = true)
+    for name in names:
+      var found = -1
+      for i, f in raw:
+        if f.fullName == name:
+          found = i
+      if found < 0:
+        pdfFail("no form field named '" & name & "'")
+      if kindOf(raw[found].inh) notin fillable:
+        pdfFail("field '" & name & "' cannot be reset")
+      targets.add(found)
+  var u = beginUpdate(base)
+  var bumped = initTable[int, int]()
+  for ti in targets:
+    let f = raw[ti]
+    if f.inh.hasFf and hasFlag(f.inh.ff, 0):
+      pdfFail("field '" & f.fullName & "' is read-only")
+    case kindOf(f.inh)
+    of fkText:
+      if f.inh.dv.kind == coNull:
+        u.dropFieldKeys(donor, bumped, f, @["V"])
+      elif f.inh.dv.kind == coStr:
+        u.setFieldValue(donor, bumped, f,
+          CosObj(kind: coStr, sval: f.inh.dv.sval))
+      else:
+        pdfFail("field '" & f.fullName & "' has a malformed default")
+    of fkCheckbox:
+      var state = "Off"
+      if f.inh.dv.kind == coName and f.inh.dv.name != "Off":
+        state = f.inh.dv.name
+      elif f.inh.dv.kind != coNull and f.inh.dv.kind != coName:
+        pdfFail("field '" & f.fullName & "' has a malformed default")
+      u.stageButtonFill(donor, bumped, f,
+        CosObj(kind: coName, name: state), true,
+        proc(w: CosObj): string = state)
+    of fkRadio:
+      var option = "Off"
+      if f.inh.dv.kind == coName and f.inh.dv.name != "Off":
+        option = f.inh.dv.name
+        if not donor.radioHasOption(f, option):
+          pdfFail("field '" & f.fullName & "' has a malformed default")
+      elif f.inh.dv.kind != coNull and f.inh.dv.kind != coName:
+        pdfFail("field '" & f.fullName & "' has a malformed default")
+      u.stageButtonFill(donor, bumped, f,
+        CosObj(kind: coName, name: option), false,
+        proc(w: CosObj): string =
+          let states = onStates(w)
+          if option != "Off" and option in states: option else: "Off")
+    of fkDropdown:
+      if f.inh.dv.kind == coNull:
+        u.dropFieldKeys(donor, bumped, f, @["V", "I"])
+      elif f.inh.dv.kind == coStr:
+        u.setFieldValue(donor, bumped, f,
+          CosObj(kind: coStr, sval: f.inh.dv.sval), @["I"])
+      else:
+        pdfFail("field '" & f.fullName & "' has a malformed default")
+    of fkListBox:
+      var raws: seq[string] = @[]
+      if f.inh.dv.kind == coStr:
+        raws.add(f.inh.dv.sval)
+      elif f.inh.dv.kind == coArray:
+        for item in f.inh.dv.items:
+          if item.kind != coStr:
+            pdfFail("field '" & f.fullName &
+              "' has a malformed default")
+          raws.add(item.sval)
+      elif f.inh.dv.kind != coNull:
+        pdfFail("field '" & f.fullName & "' has a malformed default")
+      let opts = parseOpt(f.inh.opt)
+      var pairs: seq[tuple[idx: int, value: string]] = @[]
+      for r in raws:
+        var matched = false
+        for i, o in opts:
+          if r == o.value or r == o.display:
+            pairs.add((i, o.value))
+            matched = true
+            break
+        if not matched:
+          pdfFail("field '" & f.fullName & "' has a malformed default")
+      if pairs.len > 1 and not (f.inh.hasFf and hasFlag(f.inh.ff, 21)):
+        pdfFail("field '" & f.fullName & "' has a malformed default")
+      pairs.sort()
+      u.stageChoiceValues(donor, bumped, f, pairs)
+    else:
+      pdfFail("field '" & f.fullName & "' cannot be reset")
   u.finishWithAppearances()
 
 # ---------------------------------------------------------------------------

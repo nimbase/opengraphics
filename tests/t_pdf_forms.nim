@@ -9,20 +9,20 @@ import ../src/opengraphics/pdf/forms
 import pdf_support
 
 proc formPdf(): string =
-  let annots = "[5 0 R 7 0 R 8 0 R 10 0 R 11 0 R 12 0 R 13 0 R 16 0 R 19 0 R]"
+  let annots = "[5 0 R 7 0 R 8 0 R 10 0 R 11 0 R 12 0 R 13 0 R 16 0 R 19 0 R 20 0 R]"
   assemblePdf(@[
     "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>",
     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
     "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] " &
       "/Resources << /Font << /Helv 6 0 R >> >> /Annots " & annots &
       " /Contents 14 0 R >>",
-    "<< /Fields [5 0 R 7 0 R 8 0 R 9 0 R 12 0 R 13 0 R 15 0 R 19 0 R] >>",
+    "<< /Fields [5 0 R 7 0 R 8 0 R 9 0 R 12 0 R 13 0 R 15 0 R 19 0 R 20 0 R] >>",
     "<< /Type /Annot /Subtype /Widget /Rect [50 300 200 320] " &
       "/FT /Tx /T (Name) /TU (Your full name) /V (Ann) /DV (Anon) " &
       "/DA (/Helv 12 Tf 0 g) /MaxLen 20 /P 3 0 R >>",
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     "<< /Type /Annot /Subtype /Widget /Rect [50 270 62 282] " &
-      "/FT /Btn /T (Agree) /TU (Accept terms) /V /Yes /AS /Yes " &
+      "/FT /Btn /T (Agree) /TU (Accept terms) /V /Yes /DV /Off /AS /Yes " &
       "/AP << /N << /Yes 17 0 R /Off 18 0 R >> >> /P 3 0 R >>",
     "<< /Type /Annot /Subtype /Widget /Rect [50 250 62 262] " &
       "/FT /Btn /T (Spam) /V /Off /AS /Off " &
@@ -36,7 +36,8 @@ proc formPdf(): string =
       "/AP << /N << /B 17 0 R /Off 18 0 R >> >> /P 3 0 R >>",
     "<< /Type /Annot /Subtype /Widget /Rect [50 180 150 200] " &
       "/FT /Ch /Ff 131072 /T (City) /TU (Pick a city) /V (Oslo) " &
-      "/Opt [(Oslo) (Bergen)] /DA (/Helv 12 Tf 0 g) /P 3 0 R >>",
+      "/DV (Bergen) /Opt [(Oslo) (Bergen)] /DA (/Helv 12 Tf 0 g) " &
+      "/P 3 0 R >>",
     "<< /Type /Annot /Subtype /Widget /Rect [50 100 150 130] " &
       "/FT /Sig /T (Seal) /P 3 0 R >>",
     streamObj("", "BT /Helv 12 Tf 50 350 Td (static) Tj ET"),
@@ -47,9 +48,12 @@ proc formPdf(): string =
     streamObj("", ""),
     streamObj("", ""),
     "<< /Type /Annot /Subtype /Widget /Rect [50 60 150 90] " &
-      "/FT /Ch /Ff 2097152 /T (Langs) /V [(en)] /I [0] " &
+      "/FT /Ch /Ff 2097152 /T (Langs) /V [(en)] /I [0] /DV [(no)] " &
       "/Opt [[(en) (English)] [(no) (Norwegian)]] " &
       "/DA (/Helv 12 Tf 0 g) /P 3 0 R >>",
+    "<< /Type /Annot /Subtype /Widget /Rect [50 30 150 50] " &
+      "/FT /Tx /Ff 1 /T (Code) /V (X7) /DA (/Helv 12 Tf 0 g) " &
+      "/P 3 0 R >>",
   ])
 
 proc namesOf(d: var PdfDoc): seq[string] =
@@ -59,7 +63,7 @@ proc namesOf(d: var PdfDoc): seq[string] =
 test "extraction lists fields with rich attributes":
   var d = openDoc(formPdf())
   check namesOf(d) == @["Name", "Agree", "Spam", "Pick", "City",
-    "Seal", "Addr.Street", "Langs"]
+    "Seal", "Addr.Street", "Langs", "Code"]
   let n = getField(d, "Name")
   check n.kind == fkText
   check n.value == "Ann"
@@ -122,6 +126,8 @@ test "fillText rejects wrong kinds and names":
     discard fillText(formPdf(), "Missing", "x")
   expect PdfError:
     discard fillText(formPdf(), "Seal", "x")
+  expect PdfError:
+    discard fillText(formPdf(), "Code", "x")
 
 test "setCheck flips value":
   var on = openDoc(setCheck(formPdf(), "Spam", true))
@@ -188,6 +194,47 @@ test "selectChoices syncs /V with sorted /I":
   expect PdfError:
     discard selectChoices(formPdf(), "Name", @["Bob"])
 
+test "resetFields restores text and choice defaults":
+  var n = openDoc(resetFields(fillText(formPdf(), "Name", "Bob"),
+    @["Name"]))
+  check getField(n, "Name").value == "Anon"
+  var s = openDoc(resetFields(
+    fillText(formPdf(), "Addr.Street", "Elm"), @["Addr.Street"]))
+  check getField(s, "Addr.Street").value == ""
+  var c = openDoc(resetFields(
+    selectChoice(formPdf(), "City", "Oslo"), @["City"]))
+  check getField(c, "City").value == "Bergen"
+  var l = openDoc(resetFields(
+    selectChoices(formPdf(), "Langs", @["English"]), @["Langs"]))
+  check getField(l, "Langs").value == "no"
+
+test "resetFields restores buttons":
+  var a = openDoc(resetFields(
+    setCheck(formPdf(), "Agree", false), @["Agree"]))
+  check getField(a, "Agree").value == ""
+  var p = openDoc(resetFields(
+    selectRadio(formPdf(), "Pick", "B"), @["Pick"]))
+  check getField(p, "Pick").value == ""
+  check getField(p, "Pick").widgets[1].appearance == "Off"
+
+test "resetFields with no names resets everything fillable":
+  let filled = selectChoice(setCheck(fillText(formPdf(), "Name",
+    "Bob"), "Spam", true), "City", "Oslo")
+  var d = openDoc(resetFields(filled))
+  check getField(d, "Name").value == "Anon"
+  check getField(d, "Spam").value == ""
+  check getField(d, "City").value == "Bergen"
+  check getField(d, "Langs").value == "no"
+  check "Seal" in namesOf(d)
+
+test "resetFields rejects signatures, names, and read-only":
+  expect PdfError:
+    discard resetFields(formPdf(), @["Seal"])
+  expect PdfError:
+    discard resetFields(formPdf(), @["Missing"])
+  expect PdfError:
+    discard resetFields(formPdf(), @["Code"])
+
 test "fill sets NeedAppearances":
   var d = openDoc(fillText(formPdf(), "Name", "Bob"))
   let acro = d.resolve(d.catalog().dictGet("AcroForm"))
@@ -229,7 +276,7 @@ test "flatten draws checks and radio dots":
 test "flatten only keeps the rest":
   var d = openDoc(flattenFields(formPdf(), @["Name"]))
   check namesOf(d) == @["Agree", "Spam", "Pick", "City", "Seal",
-    "Addr.Street", "Langs"]
+    "Addr.Street", "Langs", "Code"]
   var texts: seq[string] = @[]
   for r in d.extractText(0):
     texts.add(r.text)
