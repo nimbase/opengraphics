@@ -1,7 +1,7 @@
-## Form fields: list, inspect, fill, and flatten.
+## Form fields: list, inspect, fill, reset, and flatten.
 ##
 ## Builds a one-page form (text field, checkbox, dropdown) with a tiny
-## inline assembler, then walks the whole fill/flatten lifecycle.
+## inline assembler, then walks the whole fill/reset/flatten lifecycle.
 import std/strutils
 import ../src/opengraphics/pdf
 import ../src/opengraphics/pdf/docmodel
@@ -72,6 +72,11 @@ var filled = openDoc(v3)
 echo "filled Name=", getField(filled, "Name").value,
   " Agree=", isChecked(getField(filled, "Agree")),
   " City=", getField(filled, "City").value
+
+# Reset one field to its default (empty here: no /DV was given).
+let v4 = resetFields(v3, @["City"])
+var reverted = openDoc(v4)
+echo "reset City=", getField(reverted, "City").value
 
 # Flatten: values bake into page content, widgets go away.
 let flat = flattenFields(v3)
