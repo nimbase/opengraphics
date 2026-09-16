@@ -554,7 +554,7 @@ proc needAppearances(u: var PdfUpdate, donor: var PdfDoc,
     vals.add(CosObj(kind: coBool, bval: true))
   u.updateDeep(donor, bumped, u.rootNum,
     @[(isKey: true, key: "AcroForm", idx: 0)],
-    CosObj(kind: coDict, keys: keys, vals: vals))
+    CosObj(kind: coDict, keys: keys, vals: vals), followRef = true)
 
 proc checkDonor(donor: var PdfDoc) =
   if donor.crypt.present:
