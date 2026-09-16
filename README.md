@@ -26,15 +26,12 @@
   - Incremental saves: Append changes, preserve signatures
 - Read Adobe Photoshop `.psd` files
   - Headers, layers and group trees
-  - Raw, RLE and ZIP pixels (incl. ZIP prediction)
-  - Layer masks (`psd/mask`: rect, flags, -2 channel pixels, global mask)
-  - Vector shapes (`psd/vector`: `vsms`/`vmsk` path records with bezier
-    knots, `vscg`/`SoCo` solid-color fill)
-  - Smart objects (`psd/smartobject` on shared `psd/descriptor`: file
-    ids, transform, warp, bounds, size, resolution)
-  - Layer-stack renderer (`psd/render`: 20 blend modes, opacity,
-    clipping, group opacity, mask application)
-  - `TySh` text engine data (text, fonts, sizes, transform)
+  - Raw, RLE and ZIP pixel data
+  - Layer masks and global masks
+  - Vector shapes and solid-color fills
+  - Smart object metadata (transform, bounds, warp)
+  - Layer-stack rendering (blend modes, opacity, clipping, masks)
+  - Text engine data (text, fonts, sizes)
   - Thumbnails, ICC profiles
 - Read Adobe Illustrator `.ai` files
   - modern PDF-based, v1: kind detection, artboards, XMP metadata
@@ -160,55 +157,6 @@ doc.imageFromFile("photo.jpg", ImageOpts(compress: true,
 doc.save("hello.pdf")
 doc.close()
 ```
-
-Runnable versions: `examples/example_pdf_simple.nim` (basics:
-heading, paragraph, absolute text, two image modes) and
-`examples/example_pdf_report.nim` (multi-page Letter report with
-metadata, two fonts, compressed figures, read-back check).
-
-High-level writer reference (`Pdf` is an opaque handle):
-
-- Lifecycle: `newPdf(fontPath)` or `newPdf(fontBytes, baseName)`
-  starts one open page; `save(path)` writes the file (`build()` returns
-  the bytes and is repeatable); `close()` releases the HarfBuzz
-  shaping contexts. `pageCount()` counts finished pages plus the open
-  one when it holds content.
-- Page sizes (`PageSize`, default `psA4`): `psA5` 419.53x595.28,
-  `psA4` 595.28x841.89, `psA3` 841.89x1190.55, `psLetter` 612x792,
-  `psLegal` 612x1008 (points), `psCustom` with explicit width/height
-  via `pageDims`. `setPageSize` applies to later pages, `setMargin`
-  sets the working margin (default 20 mm).
-- Fonts: `newPdf()` starts on builtin Helvetica (no file, nothing
-  embedded, WinAnsi only: CJK, emoji, and Euro fail loudly instead of
-  misrendering). `loadFont(name, path)` loads a TTF/OTF program which
-  HarfBuzz shapes and the writer subset-embeds on save with full
-  Unicode; loading over an existing name (including `"body"`)
-  upgrades it. `setFont(name, size)` switches, `fontNames()` lists
-  loaded faces in order. Names stay ASCII letters, digits, `_`, `-`,
-  `.` so they double as PDF resource names. Builtin advances are the
-  Adobe AFM widths, verified against the licensed cut.
-- Text (natural layout: greedy wrap on shaped widths, left aligned,
-  no hyphenation): `paragraph` wraps and breaks pages automatically,
-  `heading(text, size = 18.0)` adds space around one wrapped title,
-  `textAt(text, x, y)` draws one absolute line, `newPage()` starts a
-  fresh page.
-- Images (`ImageOpts`): default embeds JPEG byte-for-byte and anything
-  else lossless; `compress: true` re-encodes through libvips at
-  `jpegQuality` (default 85) with optional downscale to `maxWidthPx`
-  and alpha flattened over white; `widthPt` sets the placed width
-  (default fits the text column, aspect kept).
-- Metadata: `setTitle`/`setAuthor` land in the trailer `/Info` dict.
-- Errors are loud `PdfError`: missing font file or glyph, unknown
-  font name, unreadable or decodable image, empty input.
-
-High-level reader surface (same import, no extra modules):
-`openPdf`/`readPdfBytes`/`openPdfPassword` for snapshots,
-`openDoc`/`openMappedDoc` plus `close` for lazy documents,
-`extractText` (positioned runs), `pageImages` (decoded via libvips,
-re-encoded with `encodeImage`/`saveImage`), `extractDocumentText`
-plus `searchText`, and `extractSheet` for rows and tables.
-Anything deeper (`pdf/write`, `pdf/cos`, `pdf/fontembed`,
-`pdf/shape`, ...) imports directly for advanced use.
 
 #### Writing a .pdf file (low level)
 ```nim
