@@ -1,6 +1,7 @@
 ## M6 writer: serializer, builder, rewrite, incremental update.
 import std/os
 import std/strutils
+import std/tables
 import unittest
 import ../src/opengraphics/pdf
 import ../src/opengraphics/pdf/cos
@@ -162,10 +163,13 @@ test "incremental update adds a page":
       vals.add(old.vals[i])
   let gen = u.updateObject(2, writeCos(CosObj(kind: coDict, keys: keys,
     vals: vals)))
-  check gen == 1
+  # Revisions keep the base generation so pre-existing references
+  # keep resolving in strict readers (newest entry wins via /Prev).
+  check gen == 0
   let updated = u.finishUpdate()
   check "Prev" in updated
   var d = openDoc(updated)
+  check d.xref.entries[2].gen == 0
   check d.pageCount() == 2
   check runTexts(d, 0) == @["page one"]
   check runTexts(d, 1) == @["page two"]

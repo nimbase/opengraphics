@@ -1,5 +1,6 @@
 ## M11 forms: extraction, fill, flatten.
 import std/strutils
+import std/tables
 import std/unicode
 import unittest
 import ../src/opengraphics/pdf
@@ -234,6 +235,87 @@ test "resetFields rejects signatures, names, and read-only":
     discard resetFields(formPdf(), @["Missing"])
   expect PdfError:
     discard resetFields(formPdf(), @["Code"])
+
+proc apRaw(d: var PdfDoc, fieldName: string): string =
+  ## The resolved /AP normal stream of a (merged) field widget.
+  for rf in d.rawFields():
+    if rf.fullName == fieldName:
+      let ap = rf.node.dictGet("AP")
+      check ap.kind == coDict
+      let s = d.resolve(ap.dictGet("N"))
+      check s.kind == coStream
+      return s.raw
+  doAssert false, "no field " & fieldName
+
+test "fillText generates a widget appearance":
+  var d = openDoc(fillText(formPdf(), "Name", "Bob"))
+  let raw = apRaw(d, "Name")
+  check "(Bob)" in raw
+  check "BT" in raw
+  # Revisions keep the base generation (strict-reader compat).
+  check d.xref.entries[5].gen == 0
+  # BBox matches the widget size in local space (150 x 20).
+  for rf in d.rawFields():
+    if rf.fullName == "Name":
+      let s = d.resolve(rf.node.dictGet("AP").dictGet("N"))
+      for i, k in s.streamDict:
+        if k == "BBox":
+          check s.streamVals[i].items[2].asFloat() == 150.0
+          check s.streamVals[i].items[3].asFloat() == 20.0
+
+test "appearance splits hard line breaks":
+  var d = openDoc(fillText(formPdf(), "Name", "a\nb"))
+  let raw = apRaw(d, "Name")
+  check "(a)" in raw
+  check "(b)" in raw
+
+test "selectChoice generates a widget appearance":
+  var d = openDoc(selectChoice(formPdf(), "City", "Bergen"))
+  check "(Bergen)" in apRaw(d, "City")
+
+test "reset clears the appearance text":
+  var d = openDoc(resetFields(
+    fillText(formPdf(), "Addr.Street", "Elm"), @["Addr.Street"]))
+  let raw = apRaw(d, "Addr.Street")
+  check "Elm" notin raw
+  check "BT" notin raw
+
+test "setCheck keeps existing button states":
+  var d = openDoc(setCheck(formPdf(), "Spam", true))
+  for rf in d.rawFields():
+    if rf.fullName == "Spam":
+      check rf.node.dictGet("AS").name == "Yes"
+      let n = rf.node.dictGet("AP").dictGet("N")
+      check n.kind == coDict
+      check n.keys.len == 2
+
+test "setCheck generates missing button states":
+  let pdf = assemblePdf(@[
+    "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] " &
+      "/Annots [5 0 R] /Contents 6 0 R >>",
+    "<< /Fields [5 0 R] >>",
+    "<< /Type /Annot /Subtype /Widget /Rect [10 10 22 22] " &
+      "/FT /Btn /T (Box) /V /Off /AS /Off /P 3 0 R >>",
+    streamObj("", ""),
+  ])
+  var d = openDoc(setCheck(pdf, "Box", true))
+  for rf in d.rawFields():
+    if rf.fullName == "Box":
+      check rf.node.dictGet("AS").name == "Yes"
+      let n = rf.node.dictGet("AP").dictGet("N")
+      check n.kind == coDict
+      var keys: seq[string] = @[]
+      for k in n.keys:
+        keys.add(k)
+      check "Yes" in keys
+      check "Off" in keys
+      for i, k in n.keys:
+        if k == "Yes":
+          let s = d.resolve(n.vals[i])
+          check s.kind == coStream
+          check " S " in s.raw
 
 test "fill sets NeedAppearances":
   var d = openDoc(fillText(formPdf(), "Name", "Bob"))
