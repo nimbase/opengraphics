@@ -67,6 +67,11 @@ export BlockKind, SheetRow, PdfTable, SheetPage, Sheet,
 from pdf/merge import PageRef, pageRefs, copyPage, extractPages, mergePdfs
 export PageRef, pageRefs, copyPage, extractPages, mergePdfs
 
+from pdf/attach import FileAttachment, guessMime, embeddedFiles, embedFile,
+  embedFileUpdate
+export FileAttachment, guessMime, embeddedFiles, embedFile,
+  embedFileUpdate
+
 from exporting import ExportError, ImageFormat, ExportOptions, ExportPixels,
   encodeImage, saveImage, formatForPath, formatForExt
 export ExportError, ImageFormat, ExportOptions, ExportPixels,

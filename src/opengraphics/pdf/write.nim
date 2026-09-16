@@ -181,11 +181,12 @@ type
     nextNum*: int
     infoTitle*: string
     infoAuthor*: string
+    attachSpecs*: seq[tuple[name: string, specNum: int]] ## (name, /FileSpec) pairs for the catalog /Names
 
 proc newPdfBuilder*(): PdfBuilder =
   ## Catalog is 1, page tree is 2, caller objects start at 3.
   PdfBuilder(objs: @[], kids: @[], nextNum: firstContentNum,
-    infoTitle: "", infoAuthor: "")
+    infoTitle: "", infoAuthor: "", attachSpecs: @[])
 
 proc setInfo*(b: var PdfBuilder, title = "", author = "") =
   ## Document metadata for the trailer /Info dict. Empty strings are
@@ -306,10 +307,25 @@ proc buildPdf*(b: PdfBuilder): string =
   var kids: seq[CosObj] = @[]
   for k in b.kids:
     kids.add(CosObj(kind: coRef, refNum: k, refGen: 0))
-  let catalog = writeCos(CosObj(kind: coDict,
-    keys: @["Type", "Pages"],
-    vals: @[CosObj(kind: coName, name: "Catalog"),
-      CosObj(kind: coRef, refNum: pagesNum, refGen: 0)]))
+  var catKeys = @["Type", "Pages"]
+  var catVals = @[CosObj(kind: coName, name: "Catalog"),
+    CosObj(kind: coRef, refNum: pagesNum, refGen: 0)]
+  if b.attachSpecs.len > 0:
+    # Byte-sorted /EmbeddedFiles name tree, nested directly.
+    var ordered = b.attachSpecs
+    ordered.sort(proc(a, b: tuple[name: string,
+        specNum: int]): int = cmp(a.name, b.name))
+    var items: seq[CosObj] = @[]
+    for a in ordered:
+      items.add(CosObj(kind: coStr, sval: a.name))
+      items.add(CosObj(kind: coRef, refNum: a.specNum, refGen: 0))
+    let files = CosObj(kind: coDict, keys: @["Names"],
+      vals: @[CosObj(kind: coArray, items: items)])
+    catKeys.add("Names")
+    catVals.add(CosObj(kind: coDict, keys: @["EmbeddedFiles"],
+      vals: @[files]))
+  let catalog = writeCos(CosObj(kind: coDict, keys: catKeys,
+    vals: catVals))
   let pages = writeCos(CosObj(kind: coDict,
     keys: @["Type", "Kids", "Count"],
     vals: @[CosObj(kind: coName, name: "Pages"),
