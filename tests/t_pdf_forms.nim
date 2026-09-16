@@ -1,5 +1,6 @@
 ## M11 forms: extraction, fill, flatten.
 import std/strutils
+import std/unicode
 import unittest
 import ../src/opengraphics/pdf
 import ../src/opengraphics/pdf/cos
@@ -94,6 +95,15 @@ test "fillText round-trips and truncates to MaxLen":
   var t = openDoc(fillText(formPdf(), "Name",
     "12345678901234567890123"))
   check getField(t, "Name").value.len == 20
+
+test "fillText truncates on character boundaries":
+  # 19 ASCII runes plus three 2-byte runes: a byte cut at MaxLen 20
+  # would split the first é, a rune cut keeps it whole.
+  let s = "1234567890123456789" & "ééé"
+  var d = openDoc(fillText(formPdf(), "Name", s))
+  let v = getField(d, "Name").value
+  check v.runeLen == 20
+  check v == "1234567890123456789" & "é"
 
 test "fillText rejects wrong kinds and names":
   expect PdfError:
