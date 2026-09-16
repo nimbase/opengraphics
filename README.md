@@ -3,22 +3,13 @@
 </p>
 
 <p align="center">
-  <code>nimble install opengraphics</code>
+  <code>nimble install opengraphics</code> | <code>clue install opengraphics</code>
 </p>
 
 <p align="center">
   <a href="https://nimbase.github.io/opengraphics/">API reference</a><br>
   <img src="https://github.com/nimbase/opengraphics/workflows/test/badge.svg" alt="Github Actions">  <img src="https://github.com/nimbase/opengraphics/workflows/docs/badge.svg" alt="Github Actions">
 </p>
-
-
-## Prerequisites
-- Nim toolchain plus `clue` (see repo setup); Nim deps resolve via clue
-  (`zlib`, `nimcypher`, `checksums`, plus editable `harfbuzz` and
-  `libvips` checkouts).
-- System libraries with pkg-config files: `harfbuzz` (text shaping)
-  and `vips` (image decode and color). macOS MacPorts:
-  `sudo port install harfbuzz vips`.
 
 ## Features
 - High-quality 
@@ -55,6 +46,12 @@
 - Writers for each supported format
 - Format-to-format conversion helpers
 - Building blocks for high-level libraries and apps compatible with popular graphics formats
+
+
+
+## Prerequisites
+- System libraries with pkg-config files: `harfbuzz` (text shaping)
+  and `libvips` (image decode and color)
 
 ## Examples
 Runnable versions live in `examples/` (run from the package root).
