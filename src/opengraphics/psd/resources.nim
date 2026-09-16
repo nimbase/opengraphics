@@ -33,8 +33,10 @@ type
     planes*: uint16
     jpeg*: seq[byte]
 
-proc parseResources*(r: var BinReader): ImageResources =
+proc parseResources*(r: var BinReader,
+    limits = defaultLimits()): ImageResources =
   let total = int(r.readU32BE())
+  limits.checkSection(total, "image resources")
   let sectionEnd = r.pos + total
   if total == 0:
     return ImageResources(blocks: @[])
@@ -42,12 +44,16 @@ proc parseResources*(r: var BinReader): ImageResources =
     raise newException(PsdError, "truncated image resources section")
   var blocks: seq[ResourceBlock] = @[]
   while r.pos < sectionEnd:
+    if blocks.len >= limits.maxBlocks:
+      raise newException(PsdError, "image resource count exceeds limit " &
+        $limits.maxBlocks)
     let sig = r.readStr(4)
     if sig != "8BIM" and sig != "8B64":
       raise newException(PsdError, "bad resource signature at " & $(r.pos - 4))
     let id = r.readU16BE()
     let name = r.readPascalStringEvenPadded()
     let size = int(r.readU32BE())
+    limits.checkSection(size, "image resource")
     let data = r.readBytes(size)
     if size mod 2 != 0:
       r.skip(1) # pad to even

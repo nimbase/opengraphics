@@ -4,11 +4,14 @@
 ## for future write support.
 
 import ./reader
+import ./types
 
 type
   ColorModeData* = object
     raw*: seq[byte]
 
-proc parseColorModeData*(r: var BinReader): ColorModeData =
+proc parseColorModeData*(r: var BinReader,
+    limits = defaultLimits()): ColorModeData =
   let n = int(r.readU32BE())
+  limits.checkSection(n, "color mode data")
   result = ColorModeData(raw: r.readBytes(n))

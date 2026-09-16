@@ -95,6 +95,7 @@ type
     lsct*: int # -1 = no divider block, else lsct section type 0..3
     lsdk*: int # -1 = none, else nested divider type (wins over lsct)
     tysh*: seq[byte] = @[] # empty = none, else one 8BIM/TySh block in extra
+    extra*: seq[tuple[key: string, payload: seq[byte]]] = @[]
 
 proc maskPayload*(m: TestMaskSpec): seq[byte] =
   ## Builds the mask-data field (after its u32 size prefix).
@@ -192,6 +193,13 @@ proc buildLayerRecord*(spec: TestLayerSpec): tuple[record: seq[byte], channelDat
     for v in spec.tysh: extra.add(v)
     if spec.tysh.len mod 2 != 0:
       extra.add(0)
+  for (key, payload) in spec.extra:
+    putStr(extra, "8BIM")
+    putStr(extra, key)
+    putU32BE(extra, uint32(payload.len))
+    for v in payload: extra.add(v)
+    if payload.len mod 2 != 0:
+      extra.add(0)
   putU32BE(rec, uint32(extra.len))
   for v in extra: rec.add(v)
   var cd: seq[byte] = @[]
@@ -263,6 +271,62 @@ proc putF64BE*(b: var seq[byte], v: float64) =
   for shift in [56, 48, 40, 32, 24, 16, 8, 0]:
     b.add(byte((bits shr shift) and 0xFF))
 
+proc putFixed824*(b: var seq[byte], v: float64) =
+  ## 8.24 signed fixed-point writer (vector path knots).
+  putI32BE(b, int32(v * 16777216.0))
+
+proc buildVsms*(knots: seq[tuple[v, h: float64]], closed = true,
+    version = 3'u32, initialFill = 0'u16): seq[byte] =
+  ## Minimal `vsms` payload: header + fill rule + initial fill +
+  ## one subpath with the given anchor knots (straight corners).
+  result = @[]
+  putU32BE(result, version)
+  putU32BE(result, 0) # flags
+  putU16BE(result, 6) # fill rule record
+  for _ in 0 ..< 24: result.add(0)
+  putU16BE(result, 8) # initial fill record
+  putU16BE(result, initialFill)
+  for _ in 0 ..< 22: result.add(0)
+  putU16BE(result, if closed: 0'u16 else: 3'u16)
+  putU16BE(result, uint16(knots.len))
+  for _ in 0 ..< 22: result.add(0)
+  for (v, h) in knots:
+    putU16BE(result, 1) # linked knot
+    putFixed824(result, v)
+    putFixed824(result, h)
+    putFixed824(result, v)
+    putFixed824(result, h)
+    putFixed824(result, v)
+    putFixed824(result, h)
+
+proc buildSoCo*(r, g, b: float64): seq[byte] =
+  ## Minimal `vscg` payload with a `SoCo` solid-color descriptor.
+  result = @[]
+  putStr(result, "SoCo")
+  putU32BE(result, 16) # version
+  putU32BE(result, 1) # unicode name length
+  result.add(0)
+  result.add(0)
+  putU32BE(result, 0) # classID length -> 4-byte key
+  putStr(result, "null")
+  putU32BE(result, 1) # one descriptor item
+  putU32BE(result, 0) # key length -> 4-byte key
+  putStr(result, "Clr ")
+  putStr(result, "Objc")
+  putU32BE(result, 1) # object name length
+  result.add(0)
+  result.add(0)
+  putU32BE(result, 0) # classID length -> 4-byte key
+  putStr(result, "RGBC")
+  putU32BE(result, 3) # three components
+  const keys = ["Rd  ", "Grn ", "Bl  "]
+  let vals = [r, g, b]
+  for i in 0 ..< 3:
+    putU32BE(result, 0)
+    putStr(result, keys[i])
+    putStr(result, "doub")
+    putF64BE(result, vals[i])
+
 proc encodeUtf16Be*(s: string): seq[byte] =
   ## UTF-16BE without BOM (ASCII fast path covers test strings).
   result = @[]
@@ -307,3 +371,135 @@ proc buildMinimalTySh*(text, fontName: string, fontSize = 40.0,
   putStr(result, "tdta")
   putU32BE(result, uint32(engine.len))
   for v in engine: result.add(v)
+
+proc putDescKey*(b: var seq[byte], key: string) =
+  ## Descriptor key: u32 length (0 = 4 raw bytes, else ASCII).
+  if key.len == 4:
+    putU32BE(b, 0)
+    putStr(b, key)
+  else:
+    putU32BE(b, uint32(key.len))
+    putStr(b, key)
+
+proc putDescUnicode*(b: var seq[byte], s: string) =
+  putU32BE(b, uint32(s.len))
+  for v in encodeUtf16Be(s): b.add(v)
+
+proc putDescHeader*(b: var seq[byte], classId: string, count: int) =
+  putU32BE(b, 16) # descriptor version
+  putU32BE(b, 1) # name length
+  b.add(0)
+  b.add(0)
+  putDescKey(b, classId)
+  putU32BE(b, uint32(count))
+
+proc putTextItem*(b: var seq[byte], key, s: string) =
+  putDescKey(b, key)
+  putStr(b, "TEXT")
+  putDescUnicode(b, s)
+
+proc putLongItem*(b: var seq[byte], key: string, v: int32) =
+  putDescKey(b, key)
+  putStr(b, "long")
+  putI32BE(b, v)
+
+proc putDoubItem*(b: var seq[byte], key: string, v: float64) =
+  putDescKey(b, key)
+  putStr(b, "doub")
+  putF64BE(b, v)
+
+proc putVlLsDoublesItem*(b: var seq[byte], key: string,
+    vals: openArray[float64]) =
+  putDescKey(b, key)
+  putStr(b, "VlLs")
+  putU32BE(b, uint32(vals.len))
+  for v in vals:
+    putStr(b, "doub")
+    putF64BE(b, v)
+
+proc buildCountedObjc*(classId: string, items: seq[byte],
+    count: int): seq[byte] =
+  ## Objc value with an explicit item count (putObjcItem cannot know
+  ## the count up front when called with raw bytes, so builders use
+  ## this lower-level form).
+  result = @[]
+  putU32BE(result, 1)
+  result.add(0)
+  result.add(0)
+  if classId.len == 4:
+    putU32BE(result, 0)
+    putStr(result, classId)
+  else:
+    putU32BE(result, uint32(classId.len))
+    putStr(result, classId)
+  putU32BE(result, uint32(count))
+  for v in items: result.add(v)
+
+proc putUntFItem*(b: var seq[byte], key, unit: string, v: float64) =
+  putDescKey(b, key)
+  putStr(b, "UntF")
+  putStr(b, unit)
+  putF64BE(b, v)
+
+proc putEnumItem*(b: var seq[byte], key, t, v: string) =
+  putDescKey(b, key)
+  putStr(b, "enum")
+  putDescKey(b, t)
+  putDescKey(b, v)
+
+proc buildTestSoLd*(uniqueId, placedId: string,
+    transform: array[8, float64]): seq[byte] =
+  ## Minimal `SoLd`: ids + Trnf + warp warpNone + Sz + Rslt.
+  var items: seq[byte] = @[]
+  putTextItem(items, "Idnt", uniqueId)
+  putTextItem(items, "placed", placedId)
+  putLongItem(items, "PgNm", 1)
+  putVlLsDoublesItem(items, "Trnf", transform)
+  var warpItems: seq[byte] = @[]
+  putEnumItem(warpItems, "warpStyle", "warpStyle", "warpNone")
+  var boundsItems: seq[byte] = @[]
+  putDoubItem(boundsItems, "Top ", 0.0)
+  putDoubItem(boundsItems, "Left", 0.0)
+  putDoubItem(boundsItems, "Btom", 10.0)
+  putDoubItem(boundsItems, "Rght", 20.0)
+  let boundsObj = buildCountedObjc("classFloatRect", boundsItems, 4)
+  putDescKey(warpItems, "bounds")
+  putStr(warpItems, "Objc")
+  for v in boundsObj: warpItems.add(v)
+  let warpObj = buildCountedObjc("warp", warpItems, 2)
+  putDescKey(items, "warp")
+  putStr(items, "Objc")
+  for v in warpObj: items.add(v)
+  var szItems: seq[byte] = @[]
+  putDoubItem(szItems, "Wdth", 20.0)
+  putDoubItem(szItems, "Hght", 10.0)
+  let szObj = buildCountedObjc("Pnt ", szItems, 2)
+  putDescKey(items, "Sz  ")
+  putStr(items, "Objc")
+  for v in szObj: items.add(v)
+  putUntFItem(items, "Rslt", "#Rsl", 72.0)
+  result = @[]
+  putStr(result, "soLD")
+  putU32BE(result, 4)
+  putU32BE(result, 16)
+  putU32BE(result, 1)
+  result.add(0)
+  result.add(0)
+  putU32BE(result, 0)
+  putStr(result, "null")
+  putU32BE(result, 7)
+  for v in items: result.add(v)
+
+proc buildTestPlLd*(uuid: string,
+    transform: array[8, float64]): seq[byte] =
+  ## Minimal `PlLd` fixed struct (no warp tail).
+  result = @[]
+  putStr(result, "plcL")
+  putU32BE(result, 3)
+  putStr(result, uuid)
+  putU32BE(result, 1)
+  putU32BE(result, 1)
+  putU32BE(result, 16)
+  putU32BE(result, 1)
+  for t in transform:
+    putF64BE(result, t)

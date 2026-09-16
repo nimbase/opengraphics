@@ -12,6 +12,9 @@ import psd/layers
 import psd/mask
 import psd/document
 import psd/render
+import psd/vector
+import psd/descriptor
+import psd/smartobject
 import psd/text
 import exporting
 
@@ -27,5 +30,8 @@ export layers
 export mask
 export document
 export render
+export vector
+export descriptor
+export smartobject
 export text
 export exporting

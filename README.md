@@ -37,6 +37,10 @@
   - Headers, layers and group trees
   - Raw, RLE and ZIP pixels (incl. ZIP prediction)
   - Layer masks (`psd/mask`: rect, flags, -2 channel pixels, global mask)
+  - Vector shapes (`psd/vector`: `vsms`/`vmsk` path records with bezier
+    knots, `vscg`/`SoCo` solid-color fill)
+  - Smart objects (`psd/smartobject` on shared `psd/descriptor`: file
+    ids, transform, warp, bounds, size, resolution)
   - Layer-stack renderer (`psd/render`: 20 blend modes, opacity,
     clipping, group opacity, mask application)
   - `TySh` text engine data (text, fonts, sizes, transform)
@@ -87,6 +91,24 @@ for l in doc.layers:
 # Re-render the stack instead of trusting the stored composite
 # (blend modes, opacity, clipping, group opacity, masks).
 renderDocument(doc).savePpm("render.ppm")
+
+# Vector shapes: path geometry + fill stay parsed beside the pixels.
+for l in doc.layers:
+  if l.hasVectorMask():
+    let vm = l.vectorMask().get()
+    echo l.displayName(), " subpaths=", vm.subpaths.len,
+      " knots=", vm.subpaths[0].knots.len
+  if l.hasFillContent():
+    let fc = l.fillContent().get()
+    echo l.displayName(), " fill=", fc.kindKey,
+      " (", fc.red, ",", fc.green, ",", fc.blue, ")"
+
+# Smart objects: placed-layer metadata beside the raster pixels.
+for l in doc.layers:
+  if l.isSmartObject():
+    let pl = l.placedLayer().get()
+    echo l.displayName(), " smart ", pl.kind, " id=", pl.uniqueId,
+      " warp=", pl.warpStyle
 ```
 
 ### PDF Documents
