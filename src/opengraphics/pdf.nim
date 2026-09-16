@@ -72,6 +72,13 @@ from pdf/attach import FileAttachment, guessMime, embeddedFiles, embedFile,
 export FileAttachment, guessMime, embeddedFiles, embedFile,
   embedFileUpdate
 
+from pdf/forms import FieldKind, FieldOption, FieldWidget, FormField,
+  formFields, fieldNames, getField, isChecked, fillText, setCheck,
+  selectRadio, selectChoice, flattenFields
+export FieldKind, FieldOption, FieldWidget, FormField,
+  formFields, fieldNames, getField, isChecked, fillText, setCheck,
+  selectRadio, selectChoice, flattenFields
+
 from exporting import ExportError, ImageFormat, ExportOptions, ExportPixels,
   encodeImage, saveImage, formatForPath, formatForExt
 export ExportError, ImageFormat, ExportOptions, ExportPixels,
