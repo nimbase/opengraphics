@@ -74,10 +74,10 @@ export FileAttachment, guessMime, embeddedFiles, embedFile,
 
 from pdf/forms import FieldKind, FieldOption, FieldWidget, FormField,
   formFields, fieldNames, getField, isChecked, fillText, setCheck,
-  selectRadio, selectChoice, flattenFields
+  selectRadio, selectChoice, selectChoices, flattenFields
 export FieldKind, FieldOption, FieldWidget, FormField,
   formFields, fieldNames, getField, isChecked, fillText, setCheck,
-  selectRadio, selectChoice, flattenFields
+  selectRadio, selectChoice, selectChoices, flattenFields
 
 from pdf/sign import DocSignature, SigDraft, docSignatures,
   verifyByteRangeHash, addSignaturePlaceholder

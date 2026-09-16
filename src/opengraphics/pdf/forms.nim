@@ -13,6 +13,7 @@
 ## the widget annotations, and prunes the field tree. Signature and
 ## pushbutton fields are extracted but never filled or flattened.
 
+import std/algorithm
 import std/sets
 import std/strutils
 import std/tables
@@ -39,7 +40,8 @@ type
     name*: string ## dotted partial-name chain
     label*: string ## /TU tooltip ("" when absent)
     kind*: FieldKind
-    value*: string ## /V text or selected name ("" when none/Off)
+    value*: string ## /V text, button state, or choice exports
+    ## (multi-selects join with newlines; "" when none/Off)
     defaultValue*: string ## /DV ("" when absent)
     options*: seq[FieldOption] ## choice Opt or button on-states
     maxLen*: int ## /MaxLen (-1 when absent)
@@ -145,6 +147,50 @@ proc parseOpt(opt: CosObj): seq[FieldOption] =
       result.add((item.sval, item.sval))
     elif item.kind == coName:
       result.add((item.name, item.name))
+
+proc displayOf(opts: seq[FieldOption], value: string): string =
+  for o in opts:
+    if value == o.value:
+      return o.display
+  value
+
+proc valueExports(v: CosObj): seq[string] =
+  ## Export values straight from /V: one string, or one per item.
+  result = @[]
+  if v.kind == coStr:
+    result.add(v.sval)
+  elif v.kind == coArray:
+    for item in v.items:
+      if item.kind == coStr:
+        result.add(item.sval)
+
+proc choiceExports(node: CosObj, v: CosObj,
+    opts: seq[FieldOption]): seq[string] =
+  ## Effective export values: /I indices win over /V. Falls back to
+  ## /V when /I is absent or out of range.
+  let ii = node.dictGet("I")
+  if ii.kind == coArray and ii.items.len > 0:
+    var picked: seq[string] = @[]
+    var ok = true
+    for it in ii.items:
+      if it.kind == coInt and it.ival >= 0 and it.ival < opts.len:
+        picked.add(opts[it.ival].value)
+      else:
+        ok = false
+        break
+    if ok and picked.len > 0:
+      return picked
+  valueExports(v)
+
+proc choiceValue(node: CosObj, v: CosObj,
+    opts: seq[FieldOption]): string =
+  ## Projected display text for a choice value (/I first, else /V),
+  ## displays joined with newlines. Page stamps use this; the read
+  ## API reports raw exports.
+  var displays: seq[string] = @[]
+  for e in choiceExports(node, v, opts):
+    displays.add(displayOf(opts, e))
+  displays.join("\n")
 
 proc onStates(widget: CosObj): seq[string] =
   ## Non-Off keys of the widget /AP /N dict (appearance on-states).
@@ -318,16 +364,20 @@ proc placeWidgets(d: var PdfDoc, raw: seq[RawField]): seq[seq[FieldWidget]] =
 
 proc toField(f: RawField, placed: seq[FieldWidget]): FormField =
   let kind = kindOf(f.inh)
-  var value = ""
-  if f.inh.v.kind != coNull and f.inh.v.kind != coStream:
-    let s = asText(f.inh.v)
-    value = if kind in {fkCheckbox, fkRadio} and s == "Off": "" else: s
-  var dv = ""
-  if f.inh.dv.kind != coNull and f.inh.dv.kind != coStream:
-    dv = asText(f.inh.dv)
   var options: seq[FieldOption] = @[]
   if kind in {fkDropdown, fkListBox, fkRadio}:
     options = parseOpt(f.inh.opt)
+  var value = ""
+  if kind in {fkDropdown, fkListBox}:
+    value = choiceExports(f.node, f.inh.v, options).join("\n")
+  elif f.inh.v.kind != coNull and f.inh.v.kind != coStream:
+    let s = asText(f.inh.v)
+    value = if kind in {fkCheckbox, fkRadio} and s == "Off": "" else: s
+  var dv = ""
+  if kind in {fkDropdown, fkListBox}:
+    dv = valueExports(f.inh.dv).join("\n")
+  elif f.inh.dv.kind != coNull and f.inh.dv.kind != coStream:
+    dv = asText(f.inh.dv)
   # Button on-states resolve from widget appearance dicts; the caller
   # fills them in (it owns the resolved dicts).
   var label = ""
@@ -563,7 +613,8 @@ proc checkDonor(donor: var PdfDoc) =
       "(file has /Encrypt)")
 
 proc setFieldValue(u: var PdfUpdate, donor: var PdfDoc,
-    bumped: var Table[int, int], f: RawField, val: CosObj) =
+    bumped: var Table[int, int], f: RawField, val: CosObj,
+    drop: seq[string] = @[]) =
   var keys = f.node.keys
   var vals = f.node.vals
   var found = false
@@ -574,8 +625,26 @@ proc setFieldValue(u: var PdfUpdate, donor: var PdfDoc,
   if not found:
     keys.add("V")
     vals.add(val)
+  var nkeys: seq[string] = @[]
+  var nvals: seq[CosObj] = @[]
+  for i, k in keys:
+    if k notin drop:
+      nkeys.add(k)
+      nvals.add(vals[i])
   u.updateDeep(donor, bumped, u.rootNum, acroPath(f.path),
-    CosObj(kind: coDict, keys: keys, vals: vals), followRef = true)
+    CosObj(kind: coDict, keys: nkeys, vals: nvals), followRef = true)
+
+proc dropFieldKeys(u: var PdfUpdate, donor: var PdfDoc,
+    bumped: var Table[int, int], f: RawField, drop: seq[string]) =
+  ## Remove entries (e.g. cleared /V and /I) from a field dict.
+  var nkeys: seq[string] = @[]
+  var nvals: seq[CosObj] = @[]
+  for i, k in f.node.keys:
+    if k notin drop:
+      nkeys.add(k)
+      nvals.add(f.node.vals[i])
+  u.updateDeep(donor, bumped, u.rootNum, acroPath(f.path),
+    CosObj(kind: coDict, keys: nkeys, vals: nvals), followRef = true)
 
 proc flipRefWidget(u: var PdfUpdate, donor: var PdfDoc,
     bumped: var Table[int, int], done: var HashSet[int],
@@ -820,7 +889,8 @@ proc selectRadio*(base: string, group, option: string): string =
 
 proc selectChoice*(base: string, name, option: string): string =
   ## Choose a dropdown/list-box option by display text or export
-  ## value; /V stores the display text. Editable combos take any text.
+  ## value; /V stores the export value and any stale /I goes.
+  ## Editable combos take any text.
   var donor = openDoc(base)
   donor.checkDonor()
   let f = donor.findRaw(name)
@@ -830,20 +900,85 @@ proc selectChoice*(base: string, name, option: string): string =
   if f.inh.hasFf and hasFlag(f.inh.ff, 0):
     pdfFail("field '" & name & "' is read-only")
   let opts = parseOpt(f.inh.opt)
-  var display = ""
+  var value = ""
+  var matched = false
   for o in opts:
     if option == o.display or option == o.value:
-      display = o.display
-  if display.len == 0:
+      value = o.value
+      matched = true
+      break
+  if not matched:
     if kind == fkDropdown and f.inh.hasFf and
         hasFlag(f.inh.ff, 18):
-      display = option
-    else:
-      pdfFail("choice field '" & name & "' has no option '" &
-        option & "'")
+      value = option
+      matched = true
+  if not matched:
+    pdfFail("choice field '" & name & "' has no option '" &
+      option & "'")
   var u = beginUpdate(base)
   var bumped = initTable[int, int]()
-  u.setFieldValue(donor, bumped, f, CosObj(kind: coStr, sval: display))
+  u.setFieldValue(donor, bumped, f, CosObj(kind: coStr, sval: value),
+    @["I"])
+  u.finishWithAppearances()
+
+proc selectChoices*(base: string, name: string,
+    options: seq[string]): string =
+  ## Multi-select a list box by display text or export value: /V
+  ## holds the export values and /I the sorted /Opt indices. One
+  ## option degrades to a plain /V string with no /I; empty clears
+  ## both. Dropdowns and single-select list boxes take one option
+  ## at most.
+  var donor = openDoc(base)
+  donor.checkDonor()
+  let f = donor.findRaw(name)
+  let kind = kindOf(f.inh)
+  if kind != fkDropdown and kind != fkListBox:
+    pdfFail("field '" & name & "' is not a choice field")
+  if f.inh.hasFf and hasFlag(f.inh.ff, 0):
+    pdfFail("field '" & name & "' is read-only")
+  let multi = kind == fkListBox and f.inh.hasFf and
+    hasFlag(f.inh.ff, 21)
+  if options.len > 1 and (kind == fkDropdown or not multi):
+    pdfFail("choice field '" & name & "' takes one option")
+  let opts = parseOpt(f.inh.opt)
+  var pairs: seq[tuple[idx: int, value: string]] = @[]
+  for option in options:
+    var matched = false
+    for i, o in opts:
+      if option == o.display or option == o.value:
+        matched = true
+        var dup = false
+        for p in pairs:
+          if p.value == o.value:
+            dup = true
+        if not dup:
+          pairs.add((i, o.value))
+        break
+    if not matched:
+      pdfFail("choice field '" & name & "' has no option '" &
+        option & "'")
+  pairs.sort()
+  var u = beginUpdate(base)
+  var bumped = initTable[int, int]()
+  if pairs.len == 0:
+    u.dropFieldKeys(donor, bumped, f, @["V", "I"])
+  elif pairs.len == 1:
+    u.setFieldValue(donor, bumped, f,
+      CosObj(kind: coStr, sval: pairs[0].value), @["I"])
+  else:
+    var vitems: seq[CosObj] = @[]
+    var iitems: seq[CosObj] = @[]
+    for p in pairs:
+      vitems.add(CosObj(kind: coStr, sval: p.value))
+      iitems.add(CosObj(kind: coInt, ival: p.idx))
+    var keys = f.node.keys
+    var vals = f.node.vals
+    setDictKey(keys, vals, "V",
+      CosObj(kind: coArray, items: vitems))
+    setDictKey(keys, vals, "I",
+      CosObj(kind: coArray, items: iitems))
+    u.updateDeep(donor, bumped, u.rootNum, acroPath(f.path),
+      CosObj(kind: coDict, keys: keys, vals: vals), followRef = true)
   u.finishWithAppearances()
 
 # ---------------------------------------------------------------------------
@@ -894,12 +1029,6 @@ proc stampDot(x1, y1, x2, y2: float64): string =
     fmtNum(cx + k) & " " & fmtNum(cy - r) & " " &
     fmtNum(cx + r) & " " & fmtNum(cy - k) & " " &
     fmtNum(cx + r) & " " & fmtNum(cy) & " c f Q\n"
-
-proc displayOf(opts: seq[FieldOption], value: string): string =
-  for o in opts:
-    if value == o.value:
-      return o.display
-  value
 
 proc flattenFields*(base: string, only: seq[string] = @[]): string =
   ## Bake fillable fields into page content and remove their widgets
@@ -955,9 +1084,9 @@ proc flattenFields*(base: string, only: seq[string] = @[]): string =
     elif kind == fkCheckbox:
       checkOn = f.inh.v.kind == coName and f.inh.v.name != "Off"
     elif kind in {fkDropdown, fkListBox}:
-      if f.inh.v.kind == coStr and f.inh.v.sval.len > 0:
-        text = displayOf(parseOpt(f.inh.opt), f.inh.v.sval)
-        doText = true
+      text = choiceValue(f.node, f.inh.v, parseOpt(f.inh.opt))
+        .replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+      doText = text.len > 0
     var daFont = ""
     var daSize = -1.0
     parseDa(f.inh.da, daFont, daSize)

@@ -5,17 +5,18 @@ import unittest
 import ../src/opengraphics/pdf
 import ../src/opengraphics/pdf/cos
 import ../src/opengraphics/pdf/docmodel
+import ../src/opengraphics/pdf/forms
 import pdf_support
 
 proc formPdf(): string =
-  let annots = "[5 0 R 7 0 R 8 0 R 10 0 R 11 0 R 12 0 R 13 0 R 16 0 R]"
+  let annots = "[5 0 R 7 0 R 8 0 R 10 0 R 11 0 R 12 0 R 13 0 R 16 0 R 19 0 R]"
   assemblePdf(@[
     "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>",
     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
     "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] " &
       "/Resources << /Font << /Helv 6 0 R >> >> /Annots " & annots &
       " /Contents 14 0 R >>",
-    "<< /Fields [5 0 R 7 0 R 8 0 R 9 0 R 12 0 R 13 0 R 15 0 R] >>",
+    "<< /Fields [5 0 R 7 0 R 8 0 R 9 0 R 12 0 R 13 0 R 15 0 R 19 0 R] >>",
     "<< /Type /Annot /Subtype /Widget /Rect [50 300 200 320] " &
       "/FT /Tx /T (Name) /TU (Your full name) /V (Ann) /DV (Anon) " &
       "/DA (/Helv 12 Tf 0 g) /MaxLen 20 /P 3 0 R >>",
@@ -45,6 +46,10 @@ proc formPdf(): string =
       "/V (Main) /DA (/Helv 10 Tf 0 g) /P 3 0 R >>",
     streamObj("", ""),
     streamObj("", ""),
+    "<< /Type /Annot /Subtype /Widget /Rect [50 60 150 90] " &
+      "/FT /Ch /Ff 2097152 /T (Langs) /V [(en)] /I [0] " &
+      "/Opt [[(en) (English)] [(no) (Norwegian)]] " &
+      "/DA (/Helv 12 Tf 0 g) /P 3 0 R >>",
   ])
 
 proc namesOf(d: var PdfDoc): seq[string] =
@@ -54,7 +59,7 @@ proc namesOf(d: var PdfDoc): seq[string] =
 test "extraction lists fields with rich attributes":
   var d = openDoc(formPdf())
   check namesOf(d) == @["Name", "Agree", "Spam", "Pick", "City",
-    "Seal", "Addr.Street"]
+    "Seal", "Addr.Street", "Langs"]
   let n = getField(d, "Name")
   check n.kind == fkText
   check n.value == "Ann"
@@ -83,6 +88,11 @@ test "extraction lists fields with rich attributes":
     (value: "Bergen", display: "Bergen")]
   check getField(d, "Seal").kind == fkSignature
   check getField(d, "Addr.Street").value == "Main"
+  let l = getField(d, "Langs")
+  check l.kind == fkListBox
+  check l.options == @[(value: "en", display: "English"),
+    (value: "no", display: "Norwegian")]
+  check l.value == "en"
 
 test "unknown field fails loudly":
   var d = openDoc(formPdf())
@@ -140,6 +150,44 @@ test "selectChoice by display with rejection":
   expect PdfError:
     discard selectChoice(formPdf(), "City", "Paris")
 
+test "selectChoice stores the export value":
+  var d = openDoc(selectChoice(formPdf(), "Langs", "Norwegian"))
+  check getField(d, "Langs").value == "no"
+  var e = openDoc(selectChoice(formPdf(), "Langs", "en"))
+  check getField(e, "Langs").value == "en"
+
+test "selectChoices syncs /V with sorted /I":
+  # Reversed input still lands sorted by /Opt index.
+  var d = openDoc(selectChoices(formPdf(), "Langs",
+    @["Norwegian", "English"]))
+  check getField(d, "Langs").value == "en\nno"
+  for rf in d.rawFields():
+    if rf.fullName == "Langs":
+      let v = rf.node.dictGet("V")
+      check v.kind == coArray
+      check v.items[0].sval == "en"
+      check v.items[1].sval == "no"
+      let ii = rf.node.dictGet("I")
+      check ii.kind == coArray
+      check ii.items[0].ival == 0
+      check ii.items[1].ival == 1
+  # One option degrades to a plain string and drops stale /I.
+  var s = openDoc(selectChoices(formPdf(), "Langs", @["Norwegian"]))
+  check getField(s, "Langs").value == "no"
+  for rf in s.rawFields():
+    if rf.fullName == "Langs":
+      check rf.node.dictGet("V").sval == "no"
+      check rf.node.dictGet("I").kind == coNull
+  # Empty clears the selection.
+  var c = openDoc(selectChoices(formPdf(), "Langs", @[]))
+  check getField(c, "Langs").value == ""
+  expect PdfError:
+    discard selectChoices(formPdf(), "City", @["Oslo", "Bergen"])
+  expect PdfError:
+    discard selectChoices(formPdf(), "Langs", @["Klingon"])
+  expect PdfError:
+    discard selectChoices(formPdf(), "Name", @["Bob"])
+
 test "fill sets NeedAppearances":
   var d = openDoc(fillText(formPdf(), "Name", "Bob"))
   let acro = d.resolve(d.catalog().dictGet("AcroForm"))
@@ -156,6 +204,7 @@ test "flatten bakes values and drops the form":
   check "Ann" in all
   check "Main" in all
   check "Oslo" in all
+  check "English" in all
   # Signature fields never flatten: Seal stays with its AcroForm.
   check namesOf(d) == @["Seal"]
   let cat = d.catalog()
@@ -180,7 +229,7 @@ test "flatten draws checks and radio dots":
 test "flatten only keeps the rest":
   var d = openDoc(flattenFields(formPdf(), @["Name"]))
   check namesOf(d) == @["Agree", "Spam", "Pick", "City", "Seal",
-    "Addr.Street"]
+    "Addr.Street", "Langs"]
   var texts: seq[string] = @[]
   for r in d.extractText(0):
     texts.add(r.text)
