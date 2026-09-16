@@ -248,6 +248,15 @@ proc addPage*(b: var PdfBuilder, width, height: float64, contentNum: int,
   result = b.addValue(page)
   b.kids.add(result)
 
+proc adoptPage*(b: var PdfBuilder, page: CosObj): int =
+  ## Register a caller-built /Page dictionary (for merge transplant:
+  ## the dict must carry its own /Parent reference). Returns the new
+  ## page object number.
+  if page.kind != coDict:
+    pdfFail("adoptPage needs a /Page dictionary")
+  result = b.addValue(page)
+  b.kids.add(result)
+
 proc addJpegImage*(b: var PdfBuilder, jpegBytes: string, width,
     height: int, components = 3): int =
   ## Image XObject from JPEG bytes (DCTDecode passthrough). `components`

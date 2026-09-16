@@ -64,6 +64,9 @@ from pdf/sheet import BlockKind, SheetRow, PdfTable, SheetPage, Sheet,
 export BlockKind, SheetRow, PdfTable, SheetPage, Sheet,
   extractSheet, pageCount
 
+from pdf/merge import PageRef, pageRefs, copyPage, extractPages, mergePdfs
+export PageRef, pageRefs, copyPage, extractPages, mergePdfs
+
 from exporting import ExportError, ImageFormat, ExportOptions, ExportPixels,
   encodeImage, saveImage, formatForPath, formatForExt
 export ExportError, ImageFormat, ExportOptions, ExportPixels,

@@ -10,6 +10,7 @@ import ./lexer
 import ./cos
 import ./xref
 import ./crypt
+import ./filters
 
 export xref
 export crypt
@@ -24,6 +25,54 @@ type
 
 proc resolve*(d: var PdfDoc, r: CosObj, depth = 0): CosObj
 proc decryptObj(d: var PdfDoc, num, gen: int, val: CosObj): CosObj
+proc resolveCompressed(d: var PdfDoc, num, stmNum, idx: int): CosObj =
+  ## Resolve an object packed in an /ObjStm (`stmNum`, pair `idx`).
+  ## Pair offsets are relative to /First in the decoded stream. The
+  ## stream itself carries any encryption, so inner objects return as
+  ## parsed with no per-object decryption.
+  if not d.xref.entries.hasKey(stmNum):
+    pdfFail("dangling reference to object stream " & $stmNum)
+  let se = d.xref.entries[stmNum]
+  if not se.live:
+    pdfFail("reference to freed object stream " & $stmNum)
+  if se.compressed:
+    pdfFail("object stream " & $stmNum & " packed inside another " &
+      "object stream")
+  let stm = d.resolve(CosObj(kind: coRef, refNum: stmNum, refGen: se.gen))
+  if stm.kind != coStream:
+    pdfFail("object " & $stmNum & " is not an object stream")
+  let typ = stm.dictGet("Type")
+  if typ.kind != coName or typ.name != "ObjStm":
+    pdfFail("object " & $stmNum & " is not /Type /ObjStm")
+  let nObj = stm.dictGet("N")
+  let firstObj = stm.dictGet("First")
+  if nObj.kind != coInt or firstObj.kind != coInt:
+    pdfFail("object stream " & $stmNum & " missing integer /N /First")
+  if nObj.ival < 0 or firstObj.ival < 0:
+    pdfFail("object stream " & $stmNum & " has negative /N /First")
+  d.limits.checkCount(nObj.ival, "object stream")
+  if idx < 0 or idx >= nObj.ival:
+    pdfFail("object stream index " & $idx & " out of range in stream " &
+      $stmNum)
+  let decoded = decodeCosStream(stm)
+  var lx = initLexer(fromString(decoded))
+  var target = -1
+  for i in 0 ..< nObj.ival:
+    let onum = lx.readTableInt("object stream entry number")
+    let ooff = lx.readTableInt("object stream entry offset")
+    if ooff < 0:
+      pdfFail("object stream " & $stmNum & " has negative entry offset")
+    if i == idx:
+      if onum != num:
+        pdfFail("object stream " & $stmNum & " index " & $idx &
+          " holds object " & $onum & ", not " & $num)
+      target = ooff
+  let pos = firstObj.ival + target
+  if pos < 0 or pos > decoded.len:
+    pdfFail("object " & $num & " offset out of range in stream " &
+      $stmNum)
+  var ox = initLexer(fromString(decoded), pos)
+  ox.parseCosValue()
 
 proc openDoc*(src: PdfSource, limits = defaultPdfLimits(),
     password = ""): PdfDoc =
@@ -82,6 +131,12 @@ proc resolve*(d: var PdfDoc, r: CosObj, depth = 0): CosObj =
     pdfFail("reference to freed object " & $r.refNum)
   if d.cache.len >= d.limits.maxObjects:
     pdfFail("object cache exceeds limit " & $d.limits.maxObjects)
+  if e.compressed:
+    # Packed in an object stream: the stream carries any encryption,
+    # so no per-object decryption applies. Generation is always 0.
+    let got = d.resolveCompressed(r.refNum, e.stmNum, e.stmIdx)
+    d.cache[r.refNum] = got
+    return got
   # Parse the header and value inline (rather than via parseIndirect)
   # so streams with indirect /Length can be handled: Length is
   # dereferenced first, then the body is sliced.
