@@ -16,7 +16,7 @@
 
 ## Features
 - Read & Write `.pdf`, `.psd`, `.ai`, `.eps`, `.aep` programatically
-- Unlocks creation of high-level libraries, services, and desktop/mobile applications
+- Unlocks creation of high-level libraries, services, and desktop/mobile GUI apps for editing these file formats
 - PDF reader and Writer
   - Encryption RC4, AES-128, AES-256 (R2-R6)
   - Digital Signatures PAdES B-B, B-T, B-LT, B-LTA
