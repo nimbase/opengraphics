@@ -66,10 +66,10 @@ test "dangling encrypt reference fails":
     msg = e.msg
   check "dangling reference" in msg
 
-test "xref stream names the missing piece":
+test "malformed xref stream names the missing piece":
   var data = "%PDF-1.7\n"
   let xoff = data.len
-  data.add("5 0 obj\n<< /Type /XRef /Size 6 /Root 1 0 R >>\n" &
+  data.add("5 0 obj\n<< /Type /XRef /Size 6 /Root 1 0 R /Length 0 >>\n" &
     "stream\nendstream\nendobj\n")
   data.add("startxref\n" & $xoff & "\n%%EOF\n")
   var msg = ""
@@ -77,7 +77,7 @@ test "xref stream names the missing piece":
     discard readPdfBytes(data)
   except PdfError as e:
     msg = e.msg
-  check "xref-stream" in msg
+  check "xref stream missing /W" in msg
 
 test "dangling reference rejected":
   let data = assemblePdf(@["<< /Type /Catalog /Pages 2 0 R >>",
