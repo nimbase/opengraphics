@@ -41,9 +41,6 @@
 - Shared pixel model (`ImageBuf`) designed for conversion from one format to another
 - Unknown blocks preserved as raw bytes so future writers can round-trip files
 
-> [!NOTE]
-> Note here
-
 ## Prerequisites
 - System libraries with pkg-config files: `harfbuzz` (text shaping)
   and `libvips` (image decode and color)
