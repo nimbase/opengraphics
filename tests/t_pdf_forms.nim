@@ -339,6 +339,23 @@ test "flatten bakes values and drops the form":
   let cat = d.catalog()
   check d.resolve(cat.dictGet("AcroForm")).kind == coDict
 
+test "flatten stamps hard breaks as separate lines":
+  var d = openDoc(flattenFields(fillText(formPdf(), "Name", "a\nb")))
+  var texts: seq[string] = @[]
+  for r in d.extractText(0):
+    texts.add(r.text)
+  check "a" in texts
+  check "b" in texts
+
+test "flatten stamps each selected choice":
+  var d = openDoc(flattenFields(selectChoices(formPdf(), "Langs",
+    @["English", "Norwegian"])))
+  var texts: seq[string] = @[]
+  for r in d.extractText(0):
+    texts.add(r.text)
+  check "English" in texts.join(" ")
+  check "Norwegian" in texts.join(" ")
+
 test "flatten draws checks and radio dots":
   var d = openDoc(flattenFields(formPdf()))
   # flattened page content holds stroked ticks and filled dots

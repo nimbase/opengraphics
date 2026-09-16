@@ -1369,8 +1369,11 @@ proc flattenFields*(base: string, only: seq[string] = @[]): string =
   ## Bake fillable fields into page content and remove their widgets
   ## and field nodes (whole /AcroForm goes when empty). Text uses the
   ## /DA font at the widget rect (builtin Helvetica fallback, WinAnsi
-  ## only); checks draw a stroked tick, radios a filled dot. Reports
-  ## PdfError on signature fields, unknown names, encrypted input.
+  ## only), left-aligned, hard breaks on separate lines; checks draw a
+  ## stroked tick, radios a filled dot. Comb dividers, /Q alignment,
+  ## and width-shrink auto-size stay viewer-side (they need font
+  ## metrics). Reports PdfError on signature fields, unknown names,
+  ## encrypted input.
   var donor = openDoc(base)
   donor.checkDonor()
   let raw = donor.rawFields()
@@ -1408,20 +1411,22 @@ proc flattenFields*(base: string, only: seq[string] = @[]): string =
   for ti in targets:
     let f = raw[ti]
     let kind = kindOf(f.inh)
-    var text = ""
+    var lines: seq[string] = @[]
     var doText = false
     var checkOn = false
     if kind == fkText:
       if f.inh.v.kind == coStr and f.inh.v.sval.len > 0:
-        text = f.inh.v.sval.replace("\r\n", " ").replace("\n", " ")
-          .replace("\r", " ")
+        lines = f.inh.v.sval.replace("\r\n", "\n").replace("\r",
+          "\n").splitLines()
         doText = true
     elif kind == fkCheckbox:
       checkOn = f.inh.v.kind == coName and f.inh.v.name != "Off"
     elif kind in {fkDropdown, fkListBox}:
-      text = choiceValue(f.node, f.inh.v, parseOpt(f.inh.opt))
-        .replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-      doText = text.len > 0
+      let t = choiceValue(f.node, f.inh.v, parseOpt(f.inh.opt))
+      if t.len > 0:
+        lines = t.replace("\r\n", "\n").replace("\r",
+          "\n").splitLines()
+        doText = true
     var daFont = ""
     var daSize = -1.0
     parseDa(f.inh.da, daFont, daSize)
@@ -1437,9 +1442,23 @@ proc flattenFields*(base: string, only: seq[string] = @[]): string =
       let r = readRect(pos.widget)
       if doText:
         let size = min(daSize, max(4.0, (r.y2 - r.y1) * 0.7))
-        let y = r.y1 + max(2.0, (r.y2 - r.y1 - size) * 0.4)
-        pageOps.mgetOrPut(pos.page, "").add(
-          stampText(r.x1 + 2.0, y, size, daFont, text))
+        if lines.len == 1:
+          let y = r.y1 + max(2.0, (r.y2 - r.y1 - size) * 0.4)
+          pageOps.mgetOrPut(pos.page, "").add(
+            stampText(r.x1 + 2.0, y, size, daFont, lines[0]))
+        else:
+          # Hard breaks stamp top-down, shrinking to fit the rect
+          # rather than dropping lines; overflow below 4pt still ends.
+          var multi = size
+          if lines.len > 1:
+            multi = min(size, max(4.0, (r.y2 - r.y1 - 2.0) /
+              (1.45 + 1.2 * float64(lines.len - 1))))
+          var yy = r.y2 - 2.0 - multi
+          for ln in lines:
+            if yy - multi * 0.25 >= r.y1:
+              pageOps.mgetOrPut(pos.page, "").add(
+                stampText(r.x1 + 2.0, yy, multi, daFont, ln))
+            yy -= multi * 1.2
         if daFont notin needFont.mgetOrPut(pos.page, @[]):
           needFont[pos.page].add(daFont)
       elif kind == fkCheckbox:
