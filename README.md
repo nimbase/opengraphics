@@ -15,12 +15,12 @@
 > opengraphics unifies popular graphics formats under a single API: one shared pixel model, the same open/read patterns for PSD, PDF, and AI, plus helpers to convert between formats.
 
 ## Features
-- Read & Write `.pdf`, `.psd`, `.ai`, `.eps`, `.aep` programatically
-- Unlocks creation of high-level libraries, services, and desktop/mobile GUI apps for editing these file formats
+- PDF read and write: parse, build, rewrite, and incremental update
+- Initially made for [DatEngine](https://github.com/openpeeps/datengine), a Modular AI Agentic Framework written in Nim lang
 - PDF reader and Writer
   - Encryption RC4, AES-128, AES-256 (R2-R6)
-  - Digital Signatures PAdES B-B, B-T, B-LT, B-LTA
-  - Form Filling (Text, checkbox, radio, dropdown, signature)
+  - Signatures: list fields, check ByteRange digests, append unsigned placeholder shells
+  - Form filling (text, checkbox, radio, dropdown)
   - Form flattening (fields into page content)
   - Merge & Split (Combine or extract specific pages)
   - Attachments: Embed and extract files
@@ -39,6 +39,8 @@
   - Thumbnails, ICC profiles
 - Read Adobe Illustrator `.ai` files
   - modern PDF-based, v1: kind detection, artboards, XMP metadata
+- Read After Effects `.aep` projects
+  - project structure, compositions, layers, properties
 - Shared pixel model (`ImageBuf`) designed for conversion from one format to another
 - Unknown blocks preserved as raw bytes so future writers can round-trip files
 
@@ -322,7 +324,7 @@ for ab in doc.artboards:
 ```
 
 ## Roadmap
-- Read support for `.eps`, `.aep`, and more
+- Read support for `.eps` and more
 - Writers for each supported format
 - Format-to-format conversion helpers
 - Building blocks for high-level libraries and apps compatible with popular graphics formats
