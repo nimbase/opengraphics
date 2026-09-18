@@ -7,7 +7,7 @@ import std/os
 import std/strutils
 import unittest
 import ../src/opengraphics/psd
-import ../src/opengraphics/pdf
+import ../src/opendocs/pdf
 
 test "extension mapping":
   check formatForPath("a.jpg") == fmtJpeg
