@@ -1,18 +1,26 @@
 ## Every checked-in fixture, opened and read through the public API.
 ##
 ## 01.psd is a small RGB document with a shape, a smart object and two text
-## layers. 02.psd is large (45 MB, 75 layers) and exercises nesting, groups,
-## many smart objects and reserved layer-flag bits. 03.psd is grayscale.
+## layers. 02.psd is a 600x600 RGB document with three layers, one of them
+## text. 03.psd is grayscale.
 ##
-## These are the tests that would have caught the layer-flags bug: 02.psd sets
-## bits 5-7 of the flags byte, which the spec leaves undefined, so a reader
-## that rebuilds the byte from the five defined bits cannot round-trip it.
+## What the committed fixtures no longer cover, and why that matters: 02.psd
+## used to be 47.5 MB with 75 layers and was the only fixture carrying groups,
+## masks and reserved layer-flag bits. It has been replaced with a much smaller
+## file, so **no checked-in fixture now has a group, a mask, or an undefined
+## flag bit.** Those three properties are exactly the ones a reader is most
+## likely to get subtly wrong, so `psd_testgen` now emits them and the suite
+## "fixtures: generated large fixture" below covers them against a file rather
+## than only against hand-built unit fixtures. Treat that suite as the one that
+## has to keep passing.
 
 import std/options
+import std/os
 import std/sequtils
 import std/strutils
 import unittest
 import ../src/opengraphics/psd
+import ./psd_testgen
 
 proc fixture(name: string): Document =
   readPsdBytes(readFile("tests/data/" & name))
@@ -50,51 +58,45 @@ suite "fixtures: 01.psd":
     check d.compositeImage().height == 700
 
 suite "fixtures: 02.psd":
-  test "opens as a large RGB document":
+  test "opens as a 600x600 RGB document":
     let f = readPsd(readFile("tests/data/02.psd"))
-    check f.width == 1280
-    check f.height == 640
+    check f.width == 600
+    check f.height == 600
     check f.header.depth == 8
     check f.header.colorMode.kind == cmRgb
     check f.header.channels == 3
     check f.layerInfo.isSome
-    check f.layerInfo.get().layers.len == 75
+    check f.layerInfo.get().layers.len == 3
 
-  test "has 31 resources and 11 global blocks":
+  test "has 26 resources and 7 global blocks":
     let f = readPsd(readFile("tests/data/02.psd"))
-    check f.resources.len == 31
-    check f.globalBlocks.len == 11
+    check f.resources.len == 26
+    check f.globalBlocks.len == 7
 
-
-
-  test "exercises every layer kind in one document":
+  test "carries exactly one text layer and nothing exotic":
+    # Pinned so a future replacement of this fixture is a deliberate change
+    # rather than a silent loss of whatever it used to cover.
     let f = readPsd(readFile("tests/data/02.psd"))
-    let ls = f.layers()
     var text = 0
     var shapes = 0
     var smart = 0
     var masks = 0
-    for l in ls:
+    for l in f.layers():
       if l.isTextLayer(): inc text
       if l.hasVectorMask(): inc shapes
       if l.isSmartObject(): inc smart
       if l.layerMask().isSome: inc masks
-    check text > 10
-    check shapes > 0
-    check smart > 10
-    check masks > 0
+    check text == 1
+    check shapes == 0
+    check smart == 0
+    check masks == 0
 
-  test "the layer stack nests into groups":
-    let tree = readPsd(readFile("tests/data/02.psd")).layerTree()
-    check tree.len < 75 # fewer roots than records: some are inside groups
-    var groups = 0
-    proc walk(nodes: seq[LayerNode]) =
-      for n in nodes:
-        if n.kind == lnGroup:
-          inc groups
-        walk(n.children)
-    walk(tree)
-    check groups > 0
+  test "has no groups":
+    # Asserted rather than left implicit: this fixture used to be the only
+    # source of group coverage, so its losing them is worth pinning.
+    let f = readPsd(readFile("tests/data/02.psd"))
+    for l in f.layers():
+      check not l.blocks.anyIt(it.key == "lsct")
 
   test "every layer's metadata block round-trips exactly":
     let f = readPsd(readFile("tests/data/02.psd"))
@@ -115,21 +117,62 @@ suite "fixtures: 02.psd":
       check t.fontSizes.len > 0
       check t.raw == l.getBlock("TySh").get().data
       inc found
-      if found >= 10:
-        break
-    check found > 0
+    check found == 1
+
+  test "round-trips byte for byte":
+    let bytes = readFile("tests/data/02.psd")
+    check writePsd(readPsd(bytes)) == bytes
+
+suite "fixtures: generated large fixture":
+  ## Carries what no committed fixture does any more: groups, masks and
+  ## reserved flag bits.
+  test "is large enough for the zero-copy claims to mean anything":
+    check largeFixture().getFileSize.int > 20_000_000
+
+  test "the layer stack nests into groups":
+    let tree = readPsdFile(largeFixture()).layerTree()
+    let records = readPsdFile(largeFixture()).layers().len
+    check tree.len < records # fewer roots than records: some are in groups
+    var groups = 0
+    var maxDepth = 0
+    proc walk(nodes: seq[LayerNode], depth: int) =
+      for n in nodes:
+        if n.kind == lnGroup:
+          inc groups
+          maxDepth = max(maxDepth, depth + 1)
+        walk(n.children, depth + 1)
+    walk(tree, 0)
+    check groups >= 4
+    # Depth 2 specifically: a generator that emits only sibling groups would
+    # pass a `groups > 0` check while never exercising the recursion.
+    check maxDepth >= 2
 
   test "reserved flag bits are preserved verbatim":
-    # Bits 5-7 are undefined by the spec; 02.psd sets bit 5 on many records.
-    let f = readPsd(readFile("tests/data/02.psd"))
+    # Bits 5-7 are undefined by the spec. The generated fixture sets them on
+    # some records precisely so this stays tested: a reader that rebuilds the
+    # byte from the five defined bits cannot round-trip, which is the bug that
+    # motivated the layer-flags work.
+    let f = readPsdFile(largeFixture())
     var withReserved = 0
     for l in f.layers():
       if (l.flags.rawFlags and 0xE0'u8) != 0:
         inc withReserved
     check withReserved > 0
 
+  test "masks are present and decode at their own rect":
+    let f = readPsdFile(largeFixture())
+    var masked = 0
+    for l in f.layers():
+      if l.layerMask().isSome:
+        inc masked
+        let r = l.mask.maskRect()
+        check r.width() > 0 and r.height() > 0
+        # The -2 channel is sized by the mask rect, not the layer rect.
+        check l.channel(ChannelUserMask).isSome
+    check masked > 0
+
   test "round-trips byte for byte":
-    let bytes = readFile("tests/data/02.psd")
+    let bytes = readFile(largeFixture())
     check writePsd(readPsd(bytes)) == bytes
 
 suite "fixtures: 03.psd":

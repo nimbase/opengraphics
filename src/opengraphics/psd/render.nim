@@ -43,6 +43,9 @@ import ./document
 import ./error
 import ./layers
 import ./pixels
+import ./path
+import ./raster
+import ./tagged
 
 type
   BlendMode* {.pure.} = enum
@@ -352,44 +355,86 @@ type
     ## Sampling the mask per pixel meant a full channel inflate for every pixel
     ## inside the mask rect: O(W*H) inflations of an O(W*H) channel. Hoisting the
     ## decode out of the pixel loop makes it one.
-    present: bool
-    rect: Rect
+    present: bool    ## either mask resolved to something usable
+    rasterPresent: bool
+    rect: Rect       ## the raster mask's rect, which sizes its plane
     defaultColor: int
     invert: bool
-    plane: string
+    rasterPlane: string
+    vectorPresent: bool
+    vectorPlane: string  ## layer-rect sized, so index is (y-top)*w + (x-left)
+    vectorInvert: bool
+    vectorTop, vectorLeft: int32
+    vectorWidth: int
 
 proc initMaskSampler(doc: Document, index: int): MaskSampler =
-  ## The mask of layer `index`, or an all-opaque sampler when it has none.
+  ## The masks of layer `index`, resolved into one coverage source.
+  ##
+  ## A layer can carry both a raster user mask (channel -2) and a vector mask
+  ## (`vmsk` / `vsms`), and Photoshop intersects them: a pixel needs both to
+  ## allow it through. Rather than two samplers sampled per pixel, the two are
+  ## multiplied together once here so the compositing loop keeps sampling a
+  ## single plane.
   let layer = doc.layers()[index]
+  let r = layer.rect
+
+  # The raster mask.
   let m = layer.layerMask()
-  if m.isNone:
-    return
-  let mm = m.get()
-  result.present = true
-  result.rect = mm.rect
-  result.defaultColor = int(mm.defaultColor)
-  result.invert = mm.flags.invert
-  let r = result.rect
-  if r.width() <= 0 or r.height() <= 0:
-    return
-  let plane = doc.layerPlane(index, ChannelUserMask)
-  # A mask whose channel cannot be decoded falls back to its default colour, so
-  # an unusable plane is dropped rather than sampled at the wrong stride.
-  if plane.len == r.width() * r.height():
-    result.plane = plane
+  if m.isSome:
+    let mm = m.get()
+    result.rasterPresent = true
+    # `present` even when the plane turns out to be unusable: the record's
+    # default colour is then the mask everywhere, which is the documented
+    # reading of a mask whose channel cannot be decoded. Deriving `present` from
+    # whether a plane decoded would silently discard the mask entirely.
+    result.present = true
+    result.rect = mm.rect
+    result.defaultColor = int(mm.defaultColor)
+    result.invert = mm.flags.invert
+    let mr = result.rect
+    if mr.width() > 0 and mr.height() > 0:
+      let plane = doc.layerPlane(index, ChannelUserMask)
+      if plane.len == mr.width() * mr.height():
+        result.rasterPlane = plane
+
+  # The vector mask, rasterised once to the layer's own size. `vmsk`/`vsms`
+  # knots are fractions of the *document*, so rasterising at the layer rect is
+  # the right resolution: the compositor only ever asks about pixels inside it.
+  if layer.hasVectorMask():
+    let vb = layer.vectorMask().get()
+    if (vb.flags and VectorFlagDisabled) == 0 and r.width() > 0 and r.height() > 0:
+      let plane = rasterizeBlock(vb, r.width(), r.height())
+      if plane.len == r.width() * r.height():
+        result.vectorPresent = true
+        result.vectorPlane = plane
+        result.vectorTop = r.top
+        result.vectorLeft = r.left
+        result.vectorWidth = r.width()
+        # `VectorFlagInvert` is the vector equivalent of the raster invert flag.
+        result.vectorInvert = (vb.flags and VectorFlagInvert) != 0
+        result.present = true
+
 
 proc sampleAt(m: MaskSampler, x, y: int): int =
-  ## Mask contribution 0..255 at canvas coords, with invert already applied.
+  ## Combined mask coverage 0..255 at canvas coords, with invert applied.
   if not m.present:
     return 255
-  var v = m.defaultColor
-  let r = m.rect
-  if x >= int(r.left) and x < int(r.right) and y >= int(r.top) and
-      y < int(r.bottom) and m.plane.len > 0:
-    let mw = r.width()
-    v = ord(m.plane[(y - int(r.top)) * mw + (x - int(r.left))])
-  if m.invert:
-    v = 255 - v
+  var v = 255
+  if m.rasterPresent:
+    var rv = m.defaultColor
+    let r = m.rect
+    if x >= int(r.left) and x < int(r.right) and y >= int(r.top) and
+        y < int(r.bottom) and m.rasterPlane.len > 0:
+      let mw = r.width()
+      rv = ord(m.rasterPlane[(y - int(r.top)) * mw + (x - int(r.left))])
+    if m.invert:
+      rv = 255 - rv
+    v = rv
+  if m.vectorPresent:
+    var vv = ord(m.vectorPlane[(y - m.vectorTop) * m.vectorWidth + (x - m.vectorLeft)])
+    if m.vectorInvert:
+      vv = 255 - vv
+    v = v * vv div 255
   v
 
 proc compositeOver(dst: var Rgba, src: Rgba, mode: BlendMode, opacity,
@@ -444,6 +489,71 @@ proc compositeBuffer(canvas: var ImageBuf, layer: ImageBuf, mode: BlendMode,
       compositeOver(dp, spx, mode, opacity, 255)
       canvas.setPixel(x, y, dp)
 
+proc ramp(v: int, blackLo, blackHi, whiteLo, whiteHi: int): int =
+  ## Coverage 0..255 of one Blend If quadruple.
+  ##
+  ## A quadruple is `(blackLo, blackHi, whiteLo, whiteHi)`. Below `blackLo`
+  ## nothing passes; between the two blacks the result ramps up; between the two
+  ## whites it ramps back down; above `whiteHi` nothing passes. Photoshop's
+  ## default is `0, 0, 255, 255`, which is 255 everywhere, so a layer with no
+  ## Blend If set costs one comparison per channel.
+  if v < blackLo or v > whiteHi:
+    return 0
+  var t = 255
+  # Rounded rather than truncated. Truncation biases every ramp downwards by up
+  # to half a level, and the bias compounds when two ramps multiply.
+  if blackHi > blackLo and v < blackHi:
+    let span = blackHi - blackLo
+    t = ((v - blackLo) * 255 + span div 2) div span
+  elif whiteHi > whiteLo and v > whiteLo:
+    let span = whiteHi - whiteLo
+    t = ((whiteHi - v) * 255 + span div 2) div span
+  t
+
+proc isDefaultBlendIf*(ranges: seq[BlendRange]): bool =
+  ## Whether the ranges are Photoshop's "no restriction" default, which lets the
+  ## compositor skip Blend If entirely.
+  for r in ranges:
+    if r.source != [0'u8, 0'u8, 255'u8, 255'u8] or
+        r.dest != [0'u8, 0'u8, 255'u8, 255'u8]:
+      return false
+  true
+
+proc blendIfAt*(ranges: seq[BlendRange], compositeGray, srcValue,
+    dstValue: int): int =
+  ## Blend If coverage for one pixel, 0..255.
+  ##
+  ## Each record carries a *source* quadruple, applied to the backdrop value, and
+  ## a *destination* quadruple, applied to the layer's own value. They multiply.
+  ##
+  ## The first record is the composite (grey) one; the rest are per channel, in
+  ## colour plane order. Only as many per-channel records as the caller supplies
+  ## are consulted, so an 8-bit grayscale document does not read past the end of
+  ## a two-record list.
+  if ranges.len == 0:
+    return 255
+  var cov = ramp(compositeGray, int(ranges[0].dest[0]), int(ranges[0].dest[1]),
+    int(ranges[0].dest[2]), int(ranges[0].dest[3]))
+  if cov == 0:
+    return 0
+  cov = cov * ramp(dstValue, int(ranges[0].source[0]), int(ranges[0].source[1]),
+    int(ranges[0].source[2]), int(ranges[0].source[3])) div 255
+  if cov == 0 or ranges.len < 2:
+    return cov
+  # The layer's own value against the destination quadruple of record 1, which
+  # is the first colour channel's.
+  cov = cov * ramp(srcValue, int(ranges[1].dest[0]), int(ranges[1].dest[1]),
+    int(ranges[1].dest[2]), int(ranges[1].dest[3])) div 255
+  if cov == 0 or ranges.len < 3:
+    return cov
+  cov = cov * ramp(dstValue, int(ranges[2].dest[0]), int(ranges[2].dest[1]),
+    int(ranges[2].dest[2]), int(ranges[2].dest[3])) div 255
+  cov
+
+proc compositeGrayOf(px: Rgba): int {.inline.} =
+  ## Photoshop's composite grey: the Rec. 709 luma of the pixel.
+  (54 * int(px.r) + 183 * int(px.g) + 19 * int(px.b) + 128) div 256
+
 proc blendLayerOnto(doc: Document, index: int, li: LayerImage,
     canvas: var ImageBuf, groupOpacity: int, base: ClipBase) =
   ## Composite one pixel layer over the canvas region it covers.
@@ -457,8 +567,18 @@ proc blendLayerOnto(doc: Document, index: int, li: LayerImage,
   if mode == bmPassThrough:
     return
   let dissolve = mode == bmDissolve
-  let mask = if layer.layerMask().isSome: initMaskSampler(doc, index)
-            else: MaskSampler()
+  # Built when *either* kind of mask is present. Gating this on a raster mask
+  # alone left a vector mask parsed and rasterised but never consulted, which is
+  # exactly the bug this wiring exists to fix.
+  let mask = if layer.layerMask().isSome or layer.hasVectorMask:
+               initMaskSampler(doc, index)
+             else: MaskSampler()
+  # Blend If ("Blend Using Blend If"), computed per pixel from the record's
+  # blending ranges. A layer whose ranges are the Photoshop default pays one
+  # comparison per channel and gets 255 back.
+  let defaultRanges = layer.blendingRanges.ranges()
+  let blendIf = if defaultRanges.len == 0 or isDefaultBlendIf(defaultRanges):
+                  @[] else: defaultRanges
   let clipped = layer.clipping != 0
   let r = layer.rect
   let x0 = max(int(r.left), 0)
@@ -481,10 +601,36 @@ proc blendLayerOnto(doc: Document, index: int, li: LayerImage,
       if dissolve and not dissolveKeeps(x, y, opacity):
         continue
       let spx = li.img.getPixel(x - int(r.left), y - int(r.top))
-      let mv = if mask.present: mask.sampleAt(x, y) else: 255
+      var mv = if mask.present: mask.sampleAt(x, y) else: 255
+      if blendIf.len > 0:
+        var dp0 = canvas.getPixel(x, y)
+        let ifCov = blendIfAt(blendIf, compositeGrayOf(dp0),
+          compositeGrayOf(spx), compositeGrayOf(dp0))
+        mv = mv * ifCov div 255
+        if mv == 0:
+          continue
       var dp = canvas.getPixel(x, y)
       compositeOver(dp, spx, mode, opacity, mv)
       canvas.setPixel(x, y, dp)
+
+proc groupIsIsolated(l: LayerRecord): bool =
+  ## Whether a group's children are composited as a unit rather than blended
+  ## straight into the backdrop beneath the group.
+  ##
+  ## Two things force isolation, and missing either changes the render. A blend
+  ## mode other than pass through obviously does. So does an explicit `iSO`
+  ## block, which is the one a blend-key test alone misses: Photoshop writes
+  ## `iSO` on a group whose blend mode is still `pass`, so "pass through"
+  ## cannot be decided from the mode alone. Without this such a group leaked its
+  ## children into the backdrop.
+  if blendModeFromKey(l.blendMode) != bmPassThrough:
+    return true
+  let b = l.getBlock("iSO")
+  if b.isSome:
+    let d = b.get().parsed()
+    if d.isSome and d.get().kind == bdIsolationOverride:
+      return d.get().isolated
+  false
 
 proc renderSiblings(doc: Document, nodes: seq[LayerNode], canvas: var ImageBuf,
     groupOpacity: int) =
@@ -496,7 +642,7 @@ proc renderSiblings(doc: Document, nodes: seq[LayerNode], canvas: var ImageBuf,
       continue
     if n.kind == lnGroup:
       let own = n.layer.opacity
-      if blendModeFromKey(n.layer.blendMode) == bmPassThrough:
+      if not groupIsIsolated(n.layer):
         # Pass-through: the children blend straight into the backdrop, so the
         # group's opacity folds into each of them.
         renderSiblings(doc, n.children, canvas, groupOpacity * own div 255)

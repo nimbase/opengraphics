@@ -29,6 +29,7 @@ import psd/builder
 import psd/pixels
 import psd/document
 import psd/render
+import psd/raster
 import exporting
 
 export error
@@ -52,4 +53,5 @@ export builder
 export document
 export pixels
 export render
+export raster
 export exporting

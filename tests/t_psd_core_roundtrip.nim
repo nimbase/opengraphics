@@ -1,7 +1,9 @@
 import std/options
+import std/sequtils
 import std/strutils
 import unittest
 import ../src/opengraphics/psd
+import ./psd_testgen
 
 
 
@@ -41,13 +43,31 @@ suite "round-trip: the real fixtures":
     let f = parse(bytes)
     check serialize(f) == bytes
 
-  test "02.psd, 75 layers and a raw merged image, comes back byte for byte":
-    # This file is what exposed the layer flags bug: its records set bit 5 of
-    # the flags byte, which the spec leaves undefined, so it has to be carried
-    # through verbatim rather than rebuilt from the five defined bits.
+  test "02.psd, three layers and one text layer, comes back byte for byte":
     let bytes = readFile("tests/data/02.psd")
     let f = parse(bytes)
-    check f.layers().len == 75
+    check f.layers().len == 3
+    check serialize(f) == bytes
+
+  test "a large generated file with groups, masks and reserved flags comes back byte for byte":
+    # This is what 02.psd used to cover. It was replaced by a much smaller file,
+    # and no committed fixture now carries a group, a mask or an undefined flag
+    # bit, so the generator supplies them: the reserved bits in particular are
+    # the ones that exposed the original layer-flags bug, since a reader that
+    # rebuilds the byte from the five defined bits cannot write the file back
+    # identically.
+    let bytes = readFile(largeFixture())
+    let f = parse(bytes)
+    var groups = 0
+    var reserved = 0
+    var masks = 0
+    for l in f.layers():
+      if l.blocks.anyIt(it.key == "lsct"): inc groups
+      if (l.flags.rawFlags and 0xE0'u8) != 0: inc reserved
+      if l.layerMask().isSome: inc masks
+    check groups > 0
+    check reserved > 0
+    check masks > 0
     check serialize(f) == bytes
 
   test "03.psd, grayscale with a text layer, comes back byte for byte":

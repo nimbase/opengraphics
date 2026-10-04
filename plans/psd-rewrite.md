@@ -186,7 +186,8 @@ Four bugs found while porting, three of them silent data loss:
 
 - **Layer flag bits 5-7 were dropped.** `rawFlags` rebuilt the byte from the
   five bits the spec defines, so a file setting bit 5 came back without it.
-  `02.psd` sets it on many records and no longer round-trips. `LayerFlags`
+  the large generated fixture sets it on some records, and no committed fixture
+  does any more, so that coverage now lives there. `LayerFlags`
   now carries a `reserved` field for the undefined bits.
 - **`maxBlocks` and `maxDecodedBytes` were declared but never enforced.** A
   resource or tagged-block section could expand into millions of records, and
@@ -234,15 +235,22 @@ Compositing happens at 8-bit via the `planeToU8` downscale; precision loss is
 documented. No float or 16-bit compositor.
 
 **Measured against Photoshop.** `01.psd` (all-normal) renders 97.86% of pixels
-exactly matching the stored composite; the 2% is text layer effects. `02.psd`
-reaches only 0.9% at best, because its 30 smart objects, 21 text layers, masks
-and vector shapes are not modelled yet -- phase 8 does not touch any of them.
-One honest caveat: on `02.psd`, which is the only fixture using SoftLight, the
-old approximation matched Photoshop's stored composite marginally better
-(0.9% vs 0.45%). Both figures are dominated by that file's unmodelled features,
-so neither is evidence about SoftLight. The exhaustive differential test against
-the W3C definitions is the stronger signal; matching Photoshop's own 8-bit
-SoftLight approximation instead would be a deliberate, separate choice.
+exactly matching the stored composite; the 2% is text layer effects.
+
+A second measurement once existed against the previous `02.psd`, then 47.5 MB
+with 75 layers, 30 smart objects and 21 text layers: it reached 0.9% at best,
+and the old SoftLight approximation beat the W3C one on it (0.9% versus 0.45%).
+Both halves of that are now void. `02.psd` has been replaced by a 600x600
+three-layer document that uses no SoftLight at all, so the comparison no longer
+describes anything present in the repository, and the figure was dominated by
+that file's unmodelled features rather than by blend math in any case. It has
+been struck rather than restated.
+
+What still supports the W3C choice is the exhaustive differential test against
+the definitions, over all 65536 `(src, dst)` pairs for each of the 21 separable
+modes. Matching Photoshop's own 8-bit SoftLight approximation instead would be a
+deliberate, separate choice, and there is no longer a local measurement arguing
+for it either way.
 
 ### Phase 9 — Test hardening (done)
 

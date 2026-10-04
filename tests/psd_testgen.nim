@@ -11,7 +11,9 @@
 ## be reproduced by calling the same proc with the same inputs.
 
 import std/options
+import std/os
 import std/strutils
+import std/sequtils
 import ../src/opengraphics/psd
 
 type
@@ -494,3 +496,219 @@ proc allCases*(): seq[TestCase] =
     for comp in AllCompressions:
       result.add(TestCase(name: "small " & $version & " " & $comp,
         file: small(version, comp)))
+# --- a large fixture, generated rather than committed -------------------------
+
+proc noisePlane*(w, h, depth: int, seed: uint32): string =
+  ## High-entropy planar samples, so RLE has nothing to compress.
+  ##
+  ## `patternPlane` deliberately mixes flat runs with gradients, which is what
+  ## real pixel data looks like and what makes the small corpus's RLE encoding
+  ## exercise its run and literal paths. That same property makes it useless for
+  ## making a *big* file: gradients collapse to a few bytes per row. This
+  ## variant exists purely to occupy space, so the large fixture's size is a
+  ## consequence of its geometry rather than of padding.
+  # `newString`, not `newStringOfCap`: the latter reserves capacity but leaves
+  # `len` at zero, so a loop bounded by `result.len` would never run.
+  result = newString(rowBytes(w, depth) * h)
+  var s = seed
+  for i in 0 ..< result.len:
+    # splitmix64, so successive bytes do not correlate the way a plain
+    # multiply-add LCG does.
+    s = s + 0x9E3779B9'u32
+    var z = s
+    z = (z xor (z shr 16)) * 0x21F0AAAD'u32
+    z = (z xor (z shr 15)) * 0x735A2D97'u32
+    result[i] = char(uint8((z xor (z shr 15)) shr 24))
+
+proc largeLayered*(w, h, layerCount: int, version = Version.Psd,
+    mode = ColorMode(kind: cmRgb), depth = 8, comp = Rle): PsdFile =
+  ## A layered file of roughly `layerCount * w * h * channels` bytes, with
+  ## nested groups.
+  ##
+  ## Exists because the committed `02.psd` was replaced with a 600x600
+  ## three-layer file, which is far too small to demonstrate either of the two
+  ## things it was used for. Peak RSS that does not scale with file size needs a
+  ## file big enough that a second copy would show up in the measurement, and
+  ## a byte-exact round-trip of a large file needs enough structure to be worth
+  ## asserting.
+  ##
+  ## The nested groups matter just as much. No committed fixture carries an
+  ## `lsct` block any more, so without this the group tree, pass-through,
+  ## isolated blending and group opacity would be covered only by hand-built
+  ## unit fixtures -- all of which encode the author's assumption about the
+  ## format rather than a file's.
+  let colorChannels = modeChannels(mode)
+  let channels = colorChannels + 1 # plus a merged alpha
+  var layers: seq[LayerRecord] = @[]
+  var seed = 0'u32
+  var nextId = 100'u32
+
+  proc pushNoise(rect: Rect, name: string, blend: string) =
+    inc seed
+    let (lw, lh) = rect.size()
+    # Reserved flag bits 5-7 are undefined by the spec, and no committed
+    # fixture sets them any more, so the generator does. Bits 5-7 have to
+    # survive a round trip: a reader that rebuilds the byte from the five
+    # defined bits cannot write the file back identically, which is the bug
+    # that motivated the layer-flags work.
+    let hasMask = seed mod 7 == 3
+    var rec = LayerRecord(
+      rect: rect, blendMode: blend,
+      opacity: int(128 + (seed * 7) mod 128),
+      clipping: (if seed mod 5 == 0: 1 else: 0),
+      flags: LayerFlags(
+        hidden: seed mod 11 == 0,
+        reserved: (if seed mod 6 == 0: 0xE0'u8 else: 0'u8)),
+      filler: 0'u8,
+      mask: (if hasMask: MaskData(kind: mdMask, mask: newLayerMask(
+        rectOf(rect.left div 2, rect.top div 2, int32(rect.width() div 2),
+          int32(rect.height() div 2)), 0'u8, newMaskFlags(0'u8)))
+             else: MaskData(kind: mdNone)),
+      blendingRanges: fullBlendingRanges(colorChannels),
+      name: encodeLegacyName(name),
+      blocks: @[unicodeNameBlock(name), layerIdBlock(nextId)],
+      extraTrailing: emptySpan())
+    inc nextId
+    rec.channels = @[encodeChannel(ChannelTransparency, comp,
+      noisePlane(lw, lh, depth, seed), lw, lh, depth, version)]
+    for c in 0 ..< colorChannels:
+      rec.channels.add(encodeChannel(int16(c), comp,
+        noisePlane(lw, lh, depth, seed + uint32(c) * 977 + 1), lw, lh, depth,
+        version))
+    if hasMask:
+      let mw = max(lw div 2, 0)
+      let mh = max(lh div 2, 0)
+      if mw > 0 and mh > 0:
+        rec.channels.add(encodeChannel(ChannelUserMask, comp,
+          noisePlane(mw, mh, depth, seed + 31), mw, mh, depth, version))
+    layers.add(rec)
+
+  # Background, then full-canvas layers so the bulk of the file is pixel data
+  # rather than structure.
+  pushNoise(rectOf(0'i32, 0'i32, int32(w), int32(h)), "Background", "norm")
+  var placed = 1
+
+  # Nesting is emitted explicitly rather than by a counter heuristic. An
+  # earlier version opened a group and only closed it before considering
+  # another, which produced seven groups at depth 1 -- correct-looking output
+  # that never actually nested anything, so the recursive part of the group
+  # tree stayed untested.
+  proc divider() =
+    layers.add(groupRecord(mode, GroupName,
+      SectionType(kind: stBoundingDivider), "norm", nextId))
+    inc nextId
+
+  proc folder(name: string, blend: string, open: bool,
+      isolated = false) =
+    var rec = groupRecord(mode, name,
+      SectionType(kind: (if open: stOpenFolder else: stClosedFolder)), blend,
+      nextId)
+    # A pass-through group carrying `iSO` is isolated despite its mode, which is
+    # the one group case a blend-key test cannot see. Emitted on every third
+    # outer folder so the renderer is exercised on a real file.
+    if isolated:
+      rec.blocks.add(isolationOverrideBlock(true))
+    layers.add(rec)
+    inc nextId
+
+  # Outer [ child, Inner [ grandchild ] ] then Outer itself. The inner folder is
+  # self-blended and the outer pass-through, so both compositing paths appear.
+  while placed < layerCount:
+    divider()
+    if placed < layerCount:
+      pushNoise(rectOf(0'i32, 0'i32, int32(w), int32(h)), "outer child " & $placed,
+        "mul ")
+      inc placed
+    divider()
+    while placed < layerCount and placed mod 3 != 0:
+      pushNoise(rectOf(0'i32, 0'i32, int32(w), int32(h)),
+        "inner child " & $placed, "scrn")
+      inc placed
+    folder("Inner " & $placed, "norm", false)
+    while placed < layerCount and placed mod 5 != 0:
+      pushNoise(rectOf(0'i32, 0'i32, int32(w), int32(h)),
+        "outer child " & $placed, "over")
+      inc placed
+    folder("Outer " & $placed, "pass", true, isolated = placed mod 3 == 0)
+
+  # Pad or trim so the caller gets the layer count it asked for, counting
+  # dividers and folders as records the same way the file does.
+  while layers.len < layerCount:
+    pushNoise(rectOf(0'i32, 0'i32, int32(w), int32(h)), "root " & $placed, "norm")
+    inc placed
+  while layers.len > layerCount and layers.len > 1:
+    # Never truncate into the middle of a group; only root-level records and,
+    # failing that, the outermost closers are dropped.
+    let lastIsGroup = layers[^1].blocks.anyIt(it.key == "lsct")
+    if lastIsGroup:
+      break
+    layers.setLen(layers.len - 1)
+
+  var planes: seq[string] = @[]
+  for c in 0 ..< channels:
+    planes.add(noisePlane(w, h, depth, MergedSeedBase + uint32(c)))
+  result = PsdFile(
+    header: Header(version: version, channels: channels, height: h, width: w,
+      depth: depth, colorMode: mode),
+    colorModeData: spanOf(colorModeData(mode)),
+    resources: baseResources(),
+    layerInfo: some(LayerInfo(mergedAlpha: true, layers: layers,
+      padding: none(Span))),
+    layerInfoPlacement: LayerInfoPlacement(kind: pkSection),
+    globalLayerMask: some(GlobalLayerMask(data: spanOf(newString(20)))),
+    globalBlocks: @[newTaggedBlock("Patt", ""),
+      newTaggedBlock("Txt2", "\x00\x01\x02\x03")],
+    layerMaskTrailing: emptySpan(),
+    imageData: MergedImage(compression: comp,
+      data: spanOf(encodePlanesFor(comp, planes, w, h, depth, version))))
+
+const
+  LargeFixtureTarget* = 40_000_000
+    ## Roughly this many bytes. Large enough that a second copy of the file
+    ## would be visible in a resident-memory measurement, which is the whole
+    ## point of the zero-copy tests.
+
+var largeFixturePath = ""
+
+proc largeFixture*(): string =
+  ## Path to a large fixture on disk, generated once per test run.
+  ##
+  ## Written to a temporary directory rather than committed: a 40 MB blob in
+  ## git is a poor trade for something a deterministic generator reproduces in
+  ## a couple of seconds. Cached in a module variable so every test in a suite
+  ## shares one file rather than regenerating it.
+  ##
+  ## Deliberately takes no size parameter. An earlier version did, and cached
+  ## the first result regardless of what was asked for, so a smaller request
+  ## silently pinned every later caller to the smaller file. If the size needs
+  ## to vary per test, the cache has to be keyed on it.
+  if largeFixturePath.len > 0:
+    return largeFixturePath
+  # Deliberately not `getTempDir()`. macOS reaps the per-process temporary
+  # directory aggressively, and writing 40 MB into it failed intermittently
+  # with a bare ENOENT partway through a run -- the file vanishing underneath
+  # the writer. The repo's own `testresults/` is already in `.gitignore`, so it
+  # is just as invisible to git and considerably more stable.
+  const dir = "testresults"
+  createDir(dir)
+  let path = dir / "large_fixture.psd"
+  # Sized from the geometry so the target is hit without trial and error: the
+  # noise planes do not compress, so the encoded size is close to the raw one.
+  let (w, h) = (600, 600)
+  let perLayer = w * h * 4 # three colour planes plus alpha
+  let count = max(LargeFixtureTarget div perLayer, 4)
+  writeFile(path, writePsd(largeLayered(w, h, count)))
+  largeFixturePath = path
+  # Assigning the module variable above does *not* assign `result`: a Nim proc
+  # returns its implicit `result`, which an assignment statement leaves alone.
+  # Without this the proc returned "" and every caller failed on the path.
+  path
+
+proc largeFixtureHasGroups*(): bool =
+  ## Whether the generated fixture really carries group structure, so a test can
+  ## assert the thing it depends on rather than assume it.
+  let f = readPsdFile(largeFixture())
+  for l in f.layers():
+    if l.blocks.anyIt(it.key == "lsct"):
+      return true
+  false

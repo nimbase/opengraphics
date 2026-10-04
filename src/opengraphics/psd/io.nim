@@ -387,6 +387,15 @@ proc putStr4*(w: var Writer, s: string) =
     invalid("expected a 4-byte tag, got '" & s & "'")
   w.put(s)
 
+proc putStr3*(w: var Writer, s: string) =
+  ## A 3-byte tag. The format is not uniform: `iSO` ("isolated group") is
+  ## written with three bytes where every other tagged-block key has four, so
+  ## a writer that assumes four shifts the length field of every block
+  ## containing one.
+  if s.len != 3:
+    invalid("expected a 3-byte tag, got '" & s & "'")
+  w.put(s)
+
 proc putLen*(w: var Writer, v: int64, long: bool) =
   ## A length field. In PSD a value past 2^32-1 is unrepresentable, so the
   ## writer reports it rather than truncating.

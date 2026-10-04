@@ -34,7 +34,7 @@ Consequence: only two things are zero-copy today, `Reader.root` sharing and
 (io.nim:57) both deep-copy, and every payload field is populated through one of
 them.
 
-For `tests/data/02.psd` (45.3 MB) that is the 45.3 MB root string plus a full
+For the `tests/data/02.psd` of the time (45.3 MB) that is the 45.3 MB root string plus a full
 copy of the merged composite (file.nim:204) plus a copy of every channel, tagged
 block and resource.
 
@@ -174,7 +174,7 @@ names do not.
 All three phases are done. `tests/t_psd_zero_copy.nim` (34 tests) is the
 evidence, and `tests/t_psd_core_span.nim` covers the primitives.
 
-`02.psd` (47.5 MB, 75 layers, 301 channels, 827 layer blocks, 26.5 MB of
+`02.psd` as it was when this was measured (47.5 MB, 75 layers, 301 channels, 827 layer blocks, 26.5 MB of
 global blocks) now parses into a tree of 24-byte windows. Opening it through a
 mapping raises peak RSS by kilobytes rather than the file's size.
 

@@ -49,7 +49,8 @@ type
   BlockDataKind* {.pure.} = enum
     bdUnicodeName, bdSectionDivider, bdLayerId, bdNameSource,
     bdBlendClippedAsGroup, bdBlendInteriorElements, bdKnockout,
-    bdProtection, bdSheetColor, bdFillOpacity, bdMetadataSetting
+    bdProtection, bdSheetColor, bdFillOpacity, bdMetadataSetting,
+    bdIsolationOverride
 
   BlockData* = object
     case kind*: BlockDataKind
@@ -63,6 +64,9 @@ type
     of bdSheetColor: color*: uint16
     of bdFillOpacity: fillOpacity*: uint8
     of bdMetadataSetting: metadata*: Span ## raw; see metadata.nim
+    of bdIsolationOverride: isolated*: bool
+      ## `iSO`: the group is isolated even though its blend mode is pass
+      ## through. See `groupIsIsolated`.
 
   TaggedBlock* = object
     signature*: string ## "8BIM" or "8B64", preserved as read
@@ -172,6 +176,16 @@ proc knockoutBlock*(v: uint8): TaggedBlock =
     w.putU8(0)
   newTaggedBlock("knko", w.toString())
 
+proc isolationOverrideBlock*(isolated: bool = true): TaggedBlock =
+  ## `iSO`. A group carrying this is composited as a unit even when its blend
+  ## mode is `pass`, which is how Photoshop represents a group whose children
+  ## must not blend against the backdrop beneath the group.
+  var w = initWriter()
+  w.putU8(if isolated: 1'u8 else: 0'u8)
+  for _ in 1 ..< 4:
+    w.putU8(0)
+  newTaggedBlock("iSO", w.toString())
+
 proc protectionBlock*(flags: uint32): TaggedBlock =
   var w = initWriter()
   w.putU32(flags)
@@ -259,6 +273,10 @@ proc parsed*(b: TaggedBlock): Option[BlockData] =
     if b.data.len < 1:
       return none(BlockData)
     some(BlockData(kind: bdFillOpacity, fillOpacity: r.readU8()))
+  of "iSO":
+    if b.data.len < 1:
+      return none(BlockData)
+    some(BlockData(kind: bdIsolationOverride, isolated: r.readU8() != 0))
   of "shmd":
     some(BlockData(kind: bdMetadataSetting, metadata: b.data))
   else:
@@ -266,6 +284,33 @@ proc parsed*(b: TaggedBlock): Option[BlockData] =
 
 proc isSig*(s: string): bool {.inline.} =
   s == "8BIM" or s == "8B64"
+
+const
+  ThreeByteKeys* = ["iSO"]
+    ## Tagged-block keys the format writes with three bytes instead of four.
+    ##
+    ## `iSO`, "isolated group", is the only one, and getting it wrong is not
+    ## subtle: reading four bytes for the key eats the low byte of the length
+    ## field, so every subsequent offset in the file is wrong and the parse
+    ## fails somewhere unrelated. The reference implementation shares the
+    ## four-byte assumption and cannot read a file containing one.
+
+proc keyByteLen*(key: string): int {.inline.} =
+  ## Bytes this key occupies on the wire.
+  if key in ThreeByteKeys: 3 else: 4
+
+proc readBlockKey*(r: var Reader): string =
+  ## Read a block key, honouring the three-byte form.
+  ##
+  ## `matchesAt` compares in place, so this does not materialise a view of the
+  ## block region just to test three bytes.
+  for key in ThreeByteKeys:
+    if r.matchesAt(0, key):
+      r.require(key.len)
+      result = key
+      r.pos += key.len
+      return
+  r.readStr4()
 
 proc readBlocks*(r: var Reader, version: Version,
     limits = defaultLimits()): tuple[blocks: seq[TaggedBlock], trailing: Span] =
@@ -288,7 +333,7 @@ proc readBlocks*(r: var Reader, version: Version,
       limitExceeded("tagged block count " & $result.blocks.len &
         " reaches limit " & $limits.maxBlocks)
     let sig = r.readStr4()
-    let key = r.readStr4()
+    let key = readBlockKey(r)
     let n = r.lenField(usesLongLength(version, key))
     if n > r.remaining:
       eof(int(n - r.remaining), r.pos)
@@ -323,7 +368,10 @@ proc writeBlocks*(w: var Writer, blocks: openArray[TaggedBlock],
   ## or the canonical zero-pad when `padding` is `nil`.
   for b in blocks:
     w.putStr4(b.signature)
-    w.putStr4(b.key)
+    if b.key.len == 3:
+      w.putStr3(b.key)
+    else:
+      w.putStr4(b.key)
     w.putLen(int64(b.data.len), usesLongLength(version, b.key))
     w.put(b.data)
     if b.padding.isSome:

@@ -52,6 +52,7 @@ type
     selector*: Selector
     data*: array[24, byte] ## exactly as stored
 
+
   PathData* = object
     records*: seq[PathRecord]
 
@@ -82,6 +83,17 @@ const
   VectorFlagInvert* = 1'u32
   VectorFlagNotLinked* = 2'u32
   VectorFlagDisabled* = 4'u32
+
+const
+  PathOpExclude* = -1
+    ## The subpath toggles coverage: where it overlaps an earlier subpath the
+    ## result is empty. Stored as 0.
+  PathOpAdd* = 0
+    ## Union with what came before. Stored as 1, and Photoshop's default.
+  PathOpSubtract* = 1
+    ## Remove this subpath's area from the accumulated coverage. Stored as 2.
+  PathOpIntersect* = 2
+    ## Keep only the overlap. Stored as 3.
 
 proc fixedToFloat*(v: int32): float64 {.inline.} =
   ## 8.24 signed fixed point to a fraction.

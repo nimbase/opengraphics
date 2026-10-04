@@ -8,6 +8,7 @@
 import std/options
 import unittest
 import ../src/opengraphics/psd
+import ./psd_testgen
 import ./psd_support
 
 proc maskSpec(top, left, bottom, right: int32, color = 255'u8,
@@ -191,11 +192,16 @@ test "the real fixtures parse whether or not they carry masks":
     for l in f.layers():
       check l.channelIndex(ChannelUserMask) == -1
       check l.layerMask().isNone
-    # 02.psd does have one, so it is checked separately
     check f.header.width > 0
-  let big = readPsd(readFile("tests/data/02.psd"))
+  # No committed fixture has a layer mask any more: 02.psd used to, but it was
+  # replaced by a smaller file without one. The generated fixture supplies them
+  # so the decode path stays covered.
+  let big = readPsdFile(largeFixture())
   var withMask = 0
   for l in big.layers():
     if l.layerMask().isSome:
       inc withMask
+      let r = l.mask.maskRect()
+      check r.width() > 0 and r.height() > 0
+      check l.channel(ChannelUserMask).isSome
   check withMask > 0

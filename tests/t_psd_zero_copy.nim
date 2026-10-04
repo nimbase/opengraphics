@@ -17,12 +17,20 @@
 
 import std/os
 import std/options
+import std/sequtils
 import posix
 import unittest
 
 import ../src/opengraphics/psd
+import ./psd_testgen
 
-const BigFixture = "tests/data/02.psd"
+# The committed `02.psd` was replaced with a 600x600 three-layer file, far too
+# small for these tests to mean anything: "peak RSS does not scale with file
+# size" is only demonstrable when a second copy of the file would be visible in
+# the measurement. The large fixture is generated instead of committed, and
+# carries nested groups, so the group structure is covered by a file rather than
+# only by hand-built unit fixtures.
+proc bigFixture(): string = largeFixture()
 
 proc peakRss(): int64 =
   ## Peak resident set size in bytes. Monotonic, so it answers "how much more
@@ -71,8 +79,8 @@ proc payloadBytes(f: PsdFile): int64 =
     result += int64(f.layerInfo.get().padding.get().len)
 
 suite "zero-copy: every payload is a window into the file":
-  test "02.psd's payloads sit at the offsets their lengths describe":
-    let f = readPsd(readFile(BigFixture))
+  test "the large fixture's payloads sit at the offsets their lengths describe":
+    let f = readPsd(readFile(bigFixture()))
     let src = f.source
 
     var checked = 0
@@ -100,14 +108,20 @@ suite "zero-copy: every payload is a window into the file":
     touch(f.layerMaskTrailing)
     if f.globalLayerMask.isSome: touch(f.globalLayerMask.get().data)
 
-    check checked > 1000
-    check f.layers().len == 75
+    # Sanity that the fixture is worth auditing: a few hundred distinct windows
+    # and real group structure rather than a flat stack.
+    check checked > 300
+    check f.layers().len > 20
+    var groups = 0
+    for l in f.layers:
+      if l.blocks.anyIt(it.key == "lsct"): inc groups
+    check groups > 0
 
   test "all payloads of one file share a single source":
-    let f = readPsd(readFile(BigFixture))
+    let f = readPsd(readFile(bigFixture()))
     let src = f.source
     check src.kind == skString
-    check src.size == BigFixture.getFileSize.int
+    check src.size == bigFixture().getFileSize.int
     for l in f.layers():
       for c in l.channels: check c.data.source == src
       for b in l.blocks: check b.data.source == src
@@ -117,47 +131,52 @@ suite "zero-copy: every payload is a window into the file":
 
   test "the composite window starts after the header, not at zero":
     # If anything about the offsets were wrong this would read the signature
-    let f = readPsd(readFile(BigFixture))
+    let f = readPsd(readFile(bigFixture()))
     check f.imageData.data.start > 26
     check atStart(f.imageData.data, f.source)
-    check f.imageData.data.len == 1280 * 640 * 3 # raw, 8-bit, three channels
+    # What the composite decodes to must be exactly what the header implies: one
+    # sample per pixel per channel. Asserted on the *decoded* length rather than
+    # the window, so it holds whatever compression the fixture was generated
+    # with instead of quietly assuming raw.
+    let h = f.header
+    check decodeMerged(f).len == h.width * h.height * h.channels
 
   test "the tree's windows account for the whole file":
     # Identity plus accounting is the complete argument: nothing was copied, so
     # nothing can be holding a duplicate.
-    let f = readPsd(readFile(BigFixture))
+    let f = readPsd(readFile(bigFixture()))
     let total = payloadBytes(f)
-    let fileSize = BigFixture.getFileSize.int64
+    let fileSize = bigFixture().getFileSize.int64
     # within a percent: the remainder is layer records, length fields and
     # padding, none of which are stored as payload spans
     check total > fileSize * 98 div 100
     check total <= fileSize
 
 suite "zero-copy: peak memory does not scale with file size":
-  test "re-parsing 02.psd does not raise peak RSS by the file's size":
+  test "re-parsing the large fixture does not raise peak RSS by its size":
     # Warm up first, so the allocator's arena is already large enough that a
     # fresh 47 MB allocation cannot hide inside reused pages.
-    discard readPsdFile(BigFixture)
+    discard readPsdFile(bigFixture())
     GC_fullCollect()
     let before = peakRss()
     check before > 0
     var trees: array[3, PsdFile]
     for i in 0 ..< 3:
-      trees[i] = readPsdFile(BigFixture)
+      trees[i] = readPsdFile(bigFixture())
     let growth = peakRss() - before
 
-    # Three trees held at once. A copying parser needs 3 x 45 MB more; a
+    # Three trees held at once. A copying parser needs 3 x the file size more; a
     # zero-copy one needs only the tree overhead, which is kilobytes.
-    let fileSize = BigFixture.getFileSize.int64
+    let fileSize = bigFixture().getFileSize.int64
     check growth < fileSize
     # and the trees really are all there
     for t in trees:
-      check t.layers().len == 75
+      check t.layers().len == trees[0].layers().len
       check atStart(t.imageData.data, t.source)
 
   test "a string source and a mapped source give the same tree":
-    let fromMap = readPsdFile(BigFixture)
-    let fromString = readPsd(readFile(BigFixture))
+    let fromMap = readPsdFile(bigFixture())
+    let fromString = readPsd(readFile(bigFixture()))
     check fromMap.width == fromString.width
     check fromMap.height == fromString.height
     check fromMap.layers().len == fromString.layers().len
@@ -172,9 +191,9 @@ suite "zero-copy: peak memory does not scale with file size":
         fromString.layers()[i].channels.len
 
   test "both routes round-trip byte for byte":
-    let original = readFile(BigFixture)
+    let original = readFile(bigFixture())
     check writePsd(readPsd(original)) == original
-    check writePsd(readPsdFile(BigFixture)) == original
+    check writePsd(readPsdFile(bigFixture())) == original
 
   test "reading many small trees does not scale with their bytes":
     # 03.psd is 1 MB; twenty trees of it must cost tree overhead, not 20 MB.
@@ -192,13 +211,13 @@ suite "zero-copy: peak memory does not scale with file size":
 
 suite "mmap: opening from disk":
   test "openPsd maps and still decodes":
-    let d = openPsd(BigFixture, ReadOptions(skipCompositeImageData: true))
-    check d.file.layers().len == 75
+    let d = openPsd(bigFixture(), ReadOptions(skipCompositeImageData: true))
+    check d.file.layers().len > 20
     check not d.hasComposite
 
   test "openPsdRead is the heap-reading fallback":
-    let d = openPsdRead(BigFixture, ReadOptions(skipCompositeImageData: true))
-    check d.file.layers().len == 75
+    let d = openPsdRead(bigFixture(), ReadOptions(skipCompositeImageData: true))
+    check d.file.layers().len > 20
     check not d.hasComposite
 
   test "a window read after its file is unreferenced still works":
@@ -206,7 +225,7 @@ suite "mmap: opening from disk":
     # reference, so this must not touch unmapped pages.
     var channelData: Span
     block:
-      let f = readPsdFile(BigFixture)
+      let f = readPsdFile(bigFixture())
       for l in f.layers():
         for c in l.channels:
           if c.data.len > 100_000:
