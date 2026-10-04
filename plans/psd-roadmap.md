@@ -125,10 +125,12 @@ generated large fixture carries them and `t_psd_fixtures` pins them there.
 
 ## Still open
 
-* **Rendering** the fill and stroke descriptions. `psd/fills` now reads
-  origination (`vogk`) and stroke (`vstk`) descriptors and answers questions
-  about them -- fill kind, shape bounding box, transform, stroke width and caps
-  -- but draws none of it. That is the remaining work, not the reading.
+* Applying the fill and stroke descriptions when *editing* a layer -- changing
+  a shape's colour, gradient or outline. `psd/fills` reads origination (`vogk`)
+  and stroke (`vstk`) and answers questions about them. This is not a rendering
+  gap: the compositor blends stored layer pixels, which Photoshop has already
+  rasterised the fill into, so fills render correctly today and drawing them
+  from descriptors would change nothing.
 * Gradient (`GdFl`) and pattern (`PtFl`) fills, adjustment layers (`curv`,
   `levl`, `hue2`, `blnc`, `expA`), and effect layers (`lfx2` is preserved raw,
   not interpreted).
@@ -154,6 +156,41 @@ covered by a test in `t_psd_fills`.
 * The `unitRect` keys are `"Top "`, `Left`, `Btom` and `Rght`. Descriptor keys
   are a fixed four bytes, so `Top ` is space-padded; `Btom` and `Rght` are
   misspellings. Read any of them wrong and the bounding box is 0,0,0,0.
+
+### Where the compositor actually differs from Photoshop
+
+Measured per pixel by `t_psd_fidelity`. The headline is that it is exact
+everywhere except type layers:
+
+| fixture | exact match | worst delta | pixels off by > 8 | all inside a `TySh` rect |
+| --- | --- | --- | --- | --- |
+| `01.psd` | 97.86% | 31 | 9,422 | yes |
+| `02.psd` | 59.79% | 40 | 4,107 | yes |
+| `03.psd` | 60.36% | 2 | 0 | vacuously |
+
+The percentages mislead and the deltas do not. `03.psd` differs from Photoshop by
+at most 2 levels anywhere while matching exactly on only 60% of pixels, purely
+because one type layer covers most of the canvas. The meaningful statement is the
+last column: across all three fixtures **every** pixel differing by more than 8
+lies inside a text layer's rect, and none lies anywhere else.
+
+The cause is **not** layer effects, which an earlier version of this file
+claimed. `01.psd` contains no `lfx`, `lrFX` or `lfx2` bytes at all. Recomputing
+the type layer by hand with plain 8-bit straight-alpha "source over" reproduces
+our render to within a rounding level, so our blend is right; Photoshop's stored
+composite is simply *lighter* than any blend of the pixels it stored, consistent
+with a gamma-aware composite, though no single exponent fits every case. In other
+words Photoshop's type-layer composite is not a function of the stored layer
+data, so it cannot serve as a pixel-exact oracle for text, and closing the gap
+would mean guessing at Photoshop's text rasteriser rather than fixing anything
+here. Left as a documented difference.
+
+Two limits on that guard, both measured rather than assumed. Forcing every layer
+to half opacity makes the attribution assertion report 426,301 offending pixels,
+so it does catch real regressions. But the committed fixtures **cannot** detect a
+broken vector mask at all, because `01.psd`'s only vector mask covers essentially
+its whole layer rect: disabling mask application leaves all three rendering
+identically. That is what the generated fixture is for.
 
 ### Pattern data is not exercised by anything
 
