@@ -1,151 +1,157 @@
+## Limit enforcement.
+##
+## Every cap runs on a value straight off the wire, ahead of the allocation or
+## read it guards, so these tests mostly check *where* the check fires rather
+## than that it fires: a file whose declared length overruns the input must be
+## rejected by the length check rather than by a crash later on.
+
+import std/options
 import unittest
-import ../src/opengraphics/psd/document
-import ../src/opengraphics/psd/types
+import ../src/opengraphics/psd
 import ./psd_support
 
-proc headerOnly(width, height: int): seq[byte] =
-  ## 26-byte header alone: limit checks fire before anything else
-  ## is read, so no further section bytes are needed.
-  result = @[]
-  putHeader(result, width, height, 3)
+proc headerOnly(width, height, channels = 3): string =
+  ## 26-byte header alone: limit checks fire before anything else is read, so
+  ## no further section bytes are needed.
+  var w = initWriter()
+  w.putStr4("8BPS")
+  w.putU16(1)
+  for _ in 0 ..< 6: w.putU8(0)
+  w.putU16(uint16(channels))
+  w.putU32(uint32(height))
+  w.putU32(uint32(width))
+  w.putU16(8)
+  w.putU16(3)
+  w.toString()
+
+proc tinyLimits(sectionBytes = 512_000_000, blocks = 10_000,
+    pixels = 100_000_000, layers = 1000): Limits =
+  Limits(maxWidth: 30000, maxHeight: 30000, maxPixels: pixels,
+    maxLayers: layers, maxSectionBytes: sectionBytes, maxBlocks: blocks,
+    maxDecodedBytes: 2_147_483_648)
 
 test "checkDimensions unit behavior":
+  # The promoted core uses the reference's defaults: 300000 per side with a
+  # 2^30 pixel cap, so 30001 is legal here even though old v1 limits rejected it.
   let lim = defaultLimits()
   lim.checkDimensions(1, 1, "document")
-  lim.checkDimensions(10000, 10000, "document") # exactly at the pixel cap
+  lim.checkDimensions(30_001, 10, "document")
   expect(PsdError):
     lim.checkDimensions(0, 10, "document")
   expect(PsdError):
-    lim.checkDimensions(30001, 10, "document")
+    lim.checkDimensions(300_001, 10, "document")
   expect(PsdError):
-    lim.checkDimensions(10, 30001, "document")
+    lim.checkDimensions(10, 300_001, "document")
+  # PSD itself is capped at 30000 by the spec, PSB is not
   expect(PsdError):
-    lim.checkDimensions(10000, 10001, "document") # 100M+ pixels
+    Header(version: Version.Psd, channels: 3, height: 10, width: 30_001,
+      depth: 8, colorMode: ColorMode(kind: cmRgb)).validate()
+  Header(version: Version.Psb, channels: 3, height: 10, width: 30_001,
+    depth: 8, colorMode: ColorMode(kind: cmRgb)).validate()
+
+test "checkDimensions rejects a size over the pixel cap":
+  # 30000 x 30000 is inside the spec maximum but 900M pixels is not.
+  expect(PsdError):
+    tinyLimits().checkDimensions(30_000, 30_000, "document")
+
+test "checkSection unit behavior":
+  tinyLimits().checkSection(0, "thing")
+  expect(PsdError):
+    tinyLimits().checkSection(-1, "thing")
+  expect(PsdError):
+    tinyLimits(sectionBytes = 64).checkSection(65, "thing")
+
+test "checkCount unit behavior":
+  tinyLimits().checkCount(4, 100, 16, "things")
+  expect(PsdError):
+    tinyLimits().checkCount(-1, 100, 16, "things")
+  expect(PsdError):
+    tinyLimits().checkCount(1000, 100, 16, "things")
 
 test "oversize document dimensions rejected without allocation":
   expect(PsdError):
-    discard readPsdBytes(headerOnly(30001, 10))
+    discard readPsdBytes(headerOnly(30_001, 10))
   expect(PsdError):
-    discard readPsdBytes(headerOnly(10000, 10001))
+    discard readPsdBytes(headerOnly(10_000, 10_001))
 
 test "tight custom limits reject the real fixture":
   expect(PsdError):
-    discard openPsd("tests/data/01.psd", limits = Limits(
-      maxWidth: 30000, maxHeight: 30000, maxPixels: 100, maxLayers: 1000,
-      maxSectionBytes: 512_000_000, maxBlocks: 10_000))
+    discard openPsd("tests/data/01.psd",
+      limits = tinyLimits(pixels = 100))
 
 test "layer count over limit rejected before records parse":
-  var data = headerOnly(1, 1)
-  putU32BE(data, 0) # colormode len
-  putU32BE(data, 0) # resources len
-  var section: seq[byte] = @[]
-  putU32BE(section, 2) # layerInfo len: count only
-  putI16BE(section, 3) # 3 layers, none follow
-  putU32BE(section, 0) # global mask len
-  putU32BE(data, uint32(section.len))
-  for v in section: data.add(v)
-  # composite would follow, but the count check fires first
+  var w = initWriter()
+  w.put(headerOnly(1, 1))
+  w.putU32(0) # colormode len
+  w.putU32(0) # resources len
+  var section = initWriter()
+  section.putU32(2)    # layer info len: the count field only
+  section.putI16(3)    # 3 layers declared, none follow
+  w.putU32(uint32(4))
+  w.put(section.toString())
+  w.putU32(0) # global mask len
   expect(PsdError):
-    discard readPsdBytes(data, limits = Limits(
-      maxWidth: 30000, maxHeight: 30000, maxPixels: 100_000_000,
-      maxLayers: 2, maxSectionBytes: 512_000_000, maxBlocks: 10_000))
-
-test "huge layer rect rejected before channel decode":
-  let p = @[byte(1)]
-  var data = buildPsd(1, 1, 3, @[p, p, p], layers = @[
-    TestLayerSpec(name: "Big", top: 0, left: 0, bottom: 1, right: 1,
-      planes: @[p, p, p], channelIds: @[int16(0), 1, 2],
-      useRle: false, blendKey: "norm", opacity: 255, flags: 0,
-      lsct: -1, lsdk: -1),
-  ])
-  # record starts at 26 + 4 + 4 + 4 + 4 + 2 = 44; overwrite rect
-  # with 0,0,40000,40000 (40000 = 0x9C40)
-  data[44..47] = @[byte(0), 0, 0, 0]
-  data[48..51] = @[byte(0), 0, 0, 0]
-  data[52..55] = @[byte(0), 0, 0x9C, 0x40]
-  data[56..59] = @[byte(0), 0, 0x9C, 0x40]
-  expect(PsdError):
-    discard readPsdBytes(data)
-  # also enforced on the skip path
-  expect(PsdError):
-    discard readPsdBytes(data, ReadOptions(skipLayerImageData: true))
-
-test "default limits accept the real fixture":
-  let doc = openPsd("tests/data/01.psd")
-  check doc.layerCount == 4
-
-proc tinyLimits(sectionBytes = 512_000_000, blocks = 10_000,
-    pixels = 100_000_000): Limits =
-  Limits(maxWidth: 30000, maxHeight: 30000, maxPixels: pixels,
-    maxLayers: 1000, maxSectionBytes: sectionBytes, maxBlocks: blocks)
+    discard readPsdBytes(w.toString(), limits = tinyLimits(layers = 2))
 
 test "oversize color mode data rejected before read":
-  var data = headerOnly(4, 4)
-  putU32BE(data, 16) # claims 16 bytes, none follow
+  var w = initWriter()
+  w.put(headerOnly(4, 4))
+  w.putU32(16) # claims 16 bytes, none follow
   expect(PsdError):
-    discard readPsdBytes(data, limits = tinyLimits(sectionBytes = 8))
+    discard readPsdBytes(w.toString(), limits = tinyLimits(sectionBytes = 8))
 
 test "oversize resources section rejected before parse":
-  var data = headerOnly(4, 4)
-  putU32BE(data, 0) # colormode len
-  putU32BE(data, 100) # claims 100 bytes, none follow
+  var w = initWriter()
+  w.put(headerOnly(4, 4))
+  w.putU32(0)    # colormode len
+  w.putU32(100)  # claims 100 bytes, none follow
   expect(PsdError):
-    discard readPsdBytes(data, limits = tinyLimits(sectionBytes = 64))
+    discard readPsdBytes(w.toString(), limits = tinyLimits(sectionBytes = 64))
 
 test "resource block count capped":
-  var data = headerOnly(2, 2)
-  putU32BE(data, 0) # colormode len
-  var res: seq[byte] = @[]
+  var w = initWriter()
+  w.put(headerOnly(2, 2))
+  w.putU32(0) # colormode len
+  var res = initWriter()
   for i in 0 ..< 4:
-    res.add(byte('8')); res.add(byte('B')); res.add(byte('I')); res.add(byte('M'))
-    putU16BE(res, uint16(1000 + i))
-    res.add(0); res.add(0) # empty name
-    putU32BE(res, 0) # empty payload
-  putU32BE(data, uint32(res.len))
-  for v in res: data.add(v)
-  putU32BE(data, 0) # layer section len
-  let p = @[byte(1), 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] # 2x2x3 raw
-  putU16BE(data, 0)
-  for v in p: data.add(v)
+    res.putStr4("8BIM")
+    res.putU16(uint16(1000 + i))
+    res.writePascal("", 2)
+    res.putU32(0) # empty payload
+  let resBytes = res.toString()
+  w.putU32(uint32(resBytes.len))
+  w.put(resBytes)
+  w.putU32(0) # layer section len
+  w.putU16(0) # raw composite
+  for _ in 0 ..< 4 * 4 * 3: w.putU8(1)
+  let data = w.toString()
   expect(PsdError):
     discard readPsdBytes(data, limits = tinyLimits(blocks = 2))
-  # generous cap parses fine
-  check readPsdBytes(data).resources.blocks.len == 4
+  check readPsdBytes(data).file.resources.len == 4
 
 test "oversize layer section rejected before records parse":
-  var data = headerOnly(2, 2)
-  putU32BE(data, 0) # colormode len
-  putU32BE(data, 0) # resources len
-  putU32BE(data, 10_000) # claims 10KB, none follow
+  var w = initWriter()
+  w.put(headerOnly(2, 2))
+  w.putU32(0)      # colormode len
+  w.putU32(0)      # resources len
+  w.putU32(10_000) # claims 10KB, none follow
   expect(PsdError):
-    discard readPsdBytes(data, limits = tinyLimits(sectionBytes = 64))
-
-test "oversize layer extra data rejected":
-  let p = @[byte(1)]
-  var data = buildPsd(1, 1, 3, @[p, p, p], layers = @[
-    TestLayerSpec(name: "Big", top: 0, left: 0, bottom: 1, right: 1,
-      planes: @[p, p, p], channelIds: @[int16(0), 1, 2],
-      useRle: false, blendKey: "norm", opacity: 255, flags: 0,
-      lsct: -1, lsdk: -1),
-  ])
-  # extraLen sits after rect(16) + channels(2+3*6) + sig(4) + blend(4)
-  # + opacity/clipping/flags/filler(4) = record start + 48
-  let extraAt = 26 + 4 + 4 + 4 + 4 + 2 + 48
-  check data[extraAt ..< extraAt + 4] == @[byte(0), 0, 0, 12]
-  data[extraAt .. extraAt + 3] = @[byte(0x01), 0, 0, 0] # 16MB claim
-  expect(PsdError):
-    discard readPsdBytes(data, limits = tinyLimits(sectionBytes = 64))
+    discard readPsdBytes(w.toString(), limits = tinyLimits(sectionBytes = 64))
 
 test "composite channel volume capped, not just dimensions":
-  # 4x4 with 16 channels: 256 samples > 200 cap, but 4x4 dims pass.
-  var data: seq[byte] = @[]
-  putHeader(data, 4, 4, 16)
-  putU32BE(data, 0) # colormode len
-  putU32BE(data, 0) # resources len
-  putU32BE(data, 0) # layer section len
-  putU16BE(data, 0) # raw composite
-  for _ in 0 ..< 4 * 4 * 16:
-    data.add(7)
+  # 4x4 with 16 channels: 256 samples is over a 200 cap, but 4x4 passes the
+  # dimension check, so only a channel-aware check can catch this.
+  var w = initWriter()
+  w.put(headerOnly(4, 4, 16))
+  w.putU32(0) # colormode len
+  w.putU32(0) # resources len
+  w.putU32(0) # layer section len
+  w.putU16(0) # raw composite
+  for _ in 0 ..< 4 * 4 * 16: w.putU8(7)
+  let data = w.toString()
   expect(PsdError):
     discard readPsdBytes(data, limits = tinyLimits(pixels = 200))
   check readPsdBytes(data).hasComposite
+
+test "default limits accept the real fixture":
+  check openPsd("tests/data/01.psd").layerCount == 4

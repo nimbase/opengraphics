@@ -1,13 +1,12 @@
 ## Export tests: format enum, memory encoding, file saves.
 ##
-## PSD composites and PDF images share the same entry points.
+## PSD composites are the shared entry point for every format.
 ## File saves go to the OS temp dir and are removed afterwards.
 
 import std/os
 import std/strutils
 import unittest
 import ../src/opengraphics/psd
-import ../src/opendocs/pdf
 
 test "extension mapping":
   check formatForPath("a.jpg") == fmtJpeg
@@ -43,16 +42,6 @@ test "alpha flattens for jpeg":
   check byte(jpg[0]) == 0xFF and byte(jpg[1]) == 0xD8
   let png = encodeImage(img, fmtPng)
   check png[0 ..< 4] == "\x89PNG"
-
-test "pdf image encodes png":
-  var d = openDoc(readFile("tests" / "data" / "pdf" / "m5_images.pdf"))
-  var found = false
-  for im in d.pageImages(0):
-    if im.name == "Im1":
-      let png = encodeImage(im, fmtPng)
-      check png[0 ..< 4] == "\x89PNG"
-      found = true
-  check found
 
 test "tiff without memory encoder names saveImage":
   let doc = openPsd("tests" / "data" / "01.psd")

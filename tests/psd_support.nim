@@ -2,8 +2,9 @@
 ## Builds minimal valid PSD bytes: header, colormode, resources,
 ## layer/mask, composite. Supports Raw, RLE and ZIP, 8-bit RGB/Gray.
 
-import ../src/opengraphics/psd/rle
-import ../src/opengraphics/psd/zip
+import ../src/opengraphics/psd/compression
+import ../src/opengraphics/psd/header
+import ../src/opengraphics/psd/resources
 
 proc putU16BE*(b: var seq[byte], v: uint16) =
   b.add(byte(v shr 8))
@@ -50,17 +51,18 @@ proc putHeader*(b: var seq[byte], width, height, channels: int,
   putU16BE(b, uint16(depth))
   putU16BE(b, uint16(mode))
 
+proc flatComposite*(planes: seq[seq[byte]]): string =
+  ## Concatenate planes into one buffer for the merged-image encoder.
+  result = newStringOfCap(planes.len * 1024)
+  for p in planes:
+    result.add(cast[string](p))
+
 proc encodeChannelRle*(plane: seq[byte], w, h: int): seq[byte] =
   ## Returns compression(2) + rowCounts + PackBits rows.
-  result = @[]
-  var rows: seq[seq[byte]] = @[]
-  for y in 0 ..< h:
-    rows.add(encodePackBitsRow(plane[y * w ..< (y + 1) * w]))
-  putU16BE(result, 1)
-  for r in rows:
-    putU16BE(result, uint16(r.len))
-  for r in rows:
-    for v in r: result.add(v)
+  let data = encodePlanes(Rle, cast[string](plane),
+    newPlaneLayout(1, w, h, 8, Version.Psd))
+  result = @[byte(0), byte(1)]
+  for v in data: result.add(byte(v))
 
 proc encodeChannelRaw*(plane: seq[byte]): seq[byte] =
   result = @[]
@@ -132,10 +134,10 @@ proc encodeChannelZip*(plane: seq[byte], w, h: int,
   ## Returns compression(2|3) + deflated plane (delta-applied for 3).
   result = @[]
   putU16BE(result, if prediction: 3'u16 else: 2'u16)
-  var tmp = plane
+  var tmp = cast[string](plane)
   if prediction:
-    applyPrediction(tmp, w, h)
-  for v in deflateZlib(tmp): result.add(v)
+    predict(tmp, newPlaneLayout(1, w, h, 8, Version.Psd))
+  for v in zipCompress(tmp): result.add(byte(v))
 
 proc buildLayerRecord*(spec: TestLayerSpec): tuple[record: seq[byte], channelData: seq[byte]] =
   let w = int(spec.right - spec.left)
@@ -210,11 +212,23 @@ proc buildLayerRecord*(spec: TestLayerSpec): tuple[record: seq[byte], channelDat
 proc buildPsd*(width, height, channels: int,
     planes: seq[seq[byte]], useRle = false,
     layers: seq[TestLayerSpec] = @[], useZip = false,
-    zipPrediction = false, globalMask: seq[byte] = @[]): seq[byte] =
+    zipPrediction = false, globalMask: seq[byte] = @[],
+    resources: seq[ImageResource] = @[]): seq[byte] =
   result = @[]
   putHeader(result, width, height, channels)
   putU32BE(result, 0) # colormode len
-  putU32BE(result, 0) # resources len
+  var resBytes: seq[byte] = @[]
+  for r in resources:
+    var rb: seq[byte] = @[]
+    putStr(rb, if r.signature.len == 4: r.signature else: "8BIM")
+    putU16BE(rb, uint16(r.id))
+    putPascalEven(rb, r.name)
+    putU32BE(rb, uint32(r.data.len))
+    for i in 0 ..< r.data.len: rb.add(r.data.byteAt(i))
+    if (r.data.len and 1) != 0: rb.add(byte(0)) # pad to even
+    for v in rb: resBytes.add(v)
+  putU32BE(result, uint32(resBytes.len))
+  for v in resBytes: result.add(v)
   # layer and mask
   if layers.len == 0 and globalMask.len == 0:
     putU32BE(result, 0)
@@ -236,31 +250,20 @@ proc buildPsd*(width, height, channels: int,
     for v in section: result.add(v)
   # composite
   if useZip:
-    var flat: seq[byte] = @[]
+    var flat = newStringOfCap(planes.len * width * height)
     for p in planes:
-      var tmp = p
+      var tmp = cast[string](p)
       if zipPrediction:
-        applyPrediction(tmp, width, height)
-      for v in tmp: flat.add(v)
+        predict(tmp, newPlaneLayout(1, width, height, 8, Version.Psd))
+      flat.add(tmp)
     putU16BE(result, if zipPrediction: 3'u16 else: 2'u16)
-    for v in deflateZlib(flat): result.add(v)
+    for v in zipCompress(flat): result.add(byte(v))
   elif useRle:
-    var comp: seq[byte] = @[]
-    putU16BE(comp, 1)
-    var rows: seq[seq[byte]] = @[]
-    for p in planes:
-      for y in 0 ..< height:
-        rows.add(encodePackBitsRow(p[y * width ..< (y + 1) * width]))
-    var idx = 0
-    # row counts grouped per channel: planes order
-    # rows currently interleaved per plane sequentially, which matches
-    # planar order, so emit counts in same order
-    for r in rows:
-      putU16BE(comp, uint16(r.len))
-      inc idx
-    for r in rows:
-      for v in r: comp.add(v)
-    for v in comp: result.add(v)
+    var comp2 = encodePlanes(Rle, cast[string](flatComposite(planes)),
+      newPlaneLayout(planes.len, width, height, 8, Version.Psd))
+    result.add(0)
+    result.add(1)
+    for v in comp2: result.add(byte(v))
   else:
     putU16BE(result, 0)
     for p in planes:

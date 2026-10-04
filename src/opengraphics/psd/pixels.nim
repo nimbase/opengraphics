@@ -1,8 +1,11 @@
 ## Minimal non-premultiplied pixel buffer (stdlib only).
 ## A future pixie adapter can convert from ImageBuf without
 ## touching the decoders.
+##
+## This is the compositing surface, separate from `samples.nim`, which
+## handles raw sample planes on the way to and from disk.
 
-import ./types
+import ./error
 
 type
   Rgba* = object

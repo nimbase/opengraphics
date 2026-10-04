@@ -1,8 +1,8 @@
 import std/os
 import std/strutils
 import unittest
+import ../src/opengraphics/psd/error
 import ../src/opengraphics/psd/pixels
-import ../src/opengraphics/psd/types
 
 proc readU16LE(d: string, pos: int): uint16 =
   (uint16(byte(d[pos])) or (uint16(byte(d[pos + 1])) shl 8))

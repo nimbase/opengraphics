@@ -1,8 +1,5 @@
 import unittest
-import ../src/opengraphics/psd/document
-import ../src/opengraphics/psd/layers
-import ../src/opengraphics/psd/pixels
-import ../src/opengraphics/psd/render
+import ../src/opengraphics/psd
 import ./psd_support
 
 proc solid(name: string, r, g, b: byte, w = 2, h = 2,
@@ -81,53 +78,64 @@ test "bottom-first file order wins ties":
     Rgba(r: 255, g: 0, b: 0, a: 255)
 
 test "blend formulas pin exact values":
-  check blendChannel(Multiply, 128, 128) == 64
-  check blendChannel(Screen, 128, 128) == 192
-  check blendChannel(Darken, 200, 100) == 100
-  check blendChannel(Lighten, 100, 200) == 200
-  check blendChannel(Difference, 200, 100) == 100
-  check blendChannel(Overlay, 200, 100) == 156
-  check blendChannel(Exclusion, 200, 100) == 144
-  check blendChannel(ColorBurn, 200, 100) == 58
-  check blendChannel(LinearBurn, 200, 100) == 45
-  check blendChannel(ColorDodge, 200, 100) == 255
-  check blendChannel(LinearDodge, 200, 100) == 255
-  check blendChannel(HardMix, 200, 100) == 255
-  check blendChannel(Subtract, 200, 100) == 0
-  check blendChannel(Divide, 200, 100) == 127
-  check blendChannel(HardLight, 200, 100) == 189
-  check blendChannel(SoftLight, 200, 100) == 134
-  check blendChannel(VividLight, 200, 100) == 231
-  check blendChannel(LinearLight, 200, 100) == 245
-  check blendChannel(PinLight, 200, 100) == 144
-  check blendChannel(ColorBurn, 0, 100) == 0
-  check blendChannel(ColorDodge, 255, 100) == 255
-  check blendChannel(Divide, 0, 100) == 255
+  check blendChannel(bmMultiply, 128, 128) == 64
+  check blendChannel(bmScreen, 128, 128) == 192
+  check blendChannel(bmDarken, 200, 100) == 100
+  check blendChannel(bmLighten, 100, 200) == 200
+  check blendChannel(bmDifference, 200, 100) == 100
+  check blendChannel(bmOverlay, 200, 100) == 156
+  check blendChannel(bmExclusion, 200, 100) == 144
+  check blendChannel(bmColorBurn, 200, 100) == 58
+  check blendChannel(bmLinearBurn, 200, 100) == 45
+  check blendChannel(bmColorDodge, 200, 100) == 255
+  check blendChannel(bmLinearDodge, 200, 100) == 255
+  check blendChannel(bmHardMix, 200, 100) == 255
+  check blendChannel(bmSubtract, 200, 100) == 0
+  check blendChannel(bmDivide, 200, 100) == 127
+  check blendChannel(bmHardLight, 200, 100) == 189
+  # W3C SoftLight: Cs > 0.5 and Cb > 0.25, so the result is sqrt(Cb), which is
+  # 159.7. The old approximation of the formula gave 134.
+  check blendChannel(bmSoftLight, 200, 100) == 160
+  check blendChannel(bmVividLight, 200, 100) == 231
+  check blendChannel(bmLinearLight, 200, 100) == 245
+  # W3C PinLight: Cs > 0.5 gives max(Cb, 2Cs - 1) = max(100, 145). The old
+  # 2*(Cs - 128) was off by one, being 2Cs - 256.
+  check blendChannel(bmPinLight, 200, 100) == 145
+  check blendChannel(bmColorBurn, 0, 100) == 0
+  check blendChannel(bmColorDodge, 255, 100) == 255
+  check blendChannel(bmDivide, 0, 100) == 255
 
 test "blend keys map, unknown falls back to normal":
-  check blendModeFromKey("norm") == Normal
-  check blendModeFromKey("dark") == Darken
-  check blendModeFromKey("mul ") == Multiply
-  check blendModeFromKey("idiv") == ColorBurn
-  check blendModeFromKey("lbrn") == LinearBurn
-  check blendModeFromKey("lite") == Lighten
-  check blendModeFromKey("scrn") == Screen
-  check blendModeFromKey("div ") == ColorDodge
-  check blendModeFromKey("lddg") == LinearDodge
-  check blendModeFromKey("over") == Overlay
-  check blendModeFromKey("sLit") == SoftLight
-  check blendModeFromKey("hLit") == HardLight
-  check blendModeFromKey("vLit") == VividLight
-  check blendModeFromKey("lLit") == LinearLight
-  check blendModeFromKey("pLit") == PinLight
-  check blendModeFromKey("hMix") == HardMix
-  check blendModeFromKey("diff") == Difference
-  check blendModeFromKey("smud") == Exclusion
-  check blendModeFromKey("fsub") == Subtract
-  check blendModeFromKey("fdiv") == Divide
-  check blendModeFromKey("diss") == Normal
-  check blendModeFromKey("hue ") == Normal
-  check blendModeFromKey("xxxx") == Normal
+  check blendModeFromKey("norm") == bmNormal
+  check blendModeFromKey("dark") == bmDarken
+  check blendModeFromKey("mul ") == bmMultiply
+  check blendModeFromKey("idiv") == bmColorBurn
+  check blendModeFromKey("lbrn") == bmLinearBurn
+  check blendModeFromKey("lite") == bmLighten
+  check blendModeFromKey("scrn") == bmScreen
+  check blendModeFromKey("div ") == bmColorDodge
+  check blendModeFromKey("lddg") == bmLinearDodge
+  check blendModeFromKey("over") == bmOverlay
+  check blendModeFromKey("sLit") == bmSoftLight
+  check blendModeFromKey("hLit") == bmHardLight
+  check blendModeFromKey("vLit") == bmVividLight
+  check blendModeFromKey("lLit") == bmLinearLight
+  check blendModeFromKey("pLit") == bmPinLight
+  check blendModeFromKey("hMix") == bmHardMix
+  check blendModeFromKey("diff") == bmDifference
+  check blendModeFromKey("smud") == bmExclusion
+  check blendModeFromKey("fsub") == bmSubtract
+  check blendModeFromKey("fdiv") == bmDivide
+  check blendModeFromKey("diss") == bmDissolve
+  check blendModeFromKey("hue ") == bmHue
+  check blendModeFromKey("sat ") == bmSaturation
+  check blendModeFromKey("colr") == bmColor
+  check blendModeFromKey("lum ") == bmLuminosity
+  check blendModeFromKey("dkCl") == bmDarkerColor
+  check blendModeFromKey("lgCl") == bmLighterColor
+  check blendModeFromKey("pass") == bmPassThrough
+  # only genuinely unknown keys fall back now
+  check blendModeFromKey("xxxx") == bmNormal
 
 test "multiply layer blends through the stack":
   # 128 gray multiplied over 128 gray: 128*128/255 = 64
@@ -229,24 +237,28 @@ test "renderToComposite replaces stored pixels":
   var doc = docOf(@[solid("red", 255, 0, 0)])
   doc.renderToComposite()
   check doc.hasComposite
-  check doc.compositeCompression == Raw
-  check doc.composite.getPixel(1, 0) ==
+  check doc.file.imageData.compression == Raw
+  check doc.compositeImage().getPixel(1, 0) ==
     Rgba(r: 255, g: 0, b: 0, a: 255)
 
 test "real fixture render tracks stored composite":
   let doc = openPsd("tests/data/01.psd")
   let img = renderDocument(doc)
+  # Hoist both buffers out of the loop: calling `compositeImage` per pixel
+  # copies the whole ImageBuf value 490000 times.
+  let rendered = img.data
+  let stored = doc.compositeImage().data
   check img.width == 700
   check img.height == 700
   var opaque = 0
   var same = 0
-  for i in 0 ..< img.data.len:
-    if img.data[i].a == 255:
+  for i in 0 ..< rendered.len:
+    if rendered[i].a == 255:
       inc opaque
-    let a = img.data[i]
-    let b = doc.composite.data[i]
+    let a = rendered[i]
+    let b = stored[i]
     if a.r == b.r and a.g == b.g and a.b == b.b:
       inc same
   check opaque == img.data.len
   check same > 400000 # ~98% exact; text effects account for the rest
-  check img.getPixel(0, 0) == doc.composite.getPixel(0, 0)
+  check img.getPixel(0, 0) == doc.compositeImage().getPixel(0, 0)

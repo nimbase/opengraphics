@@ -1,17 +1,15 @@
 ## High-level image export through libvips.
 ##
 ## One format enum plus options shared by every module: PSD composites
-## (ImageBuf) and PDF images (PdfImage) convert to ExportPixels and
-## encode or save. JPEG, PNG and WebP encode to memory; every format
-## saves to a path, dispatched by file extension. Alpha flattens over
-## white for JPEG (the only listed format without alpha); vips errors
-## surface as ExportError.
+## (ImageBuf) convert to ExportPixels and encode or save. JPEG, PNG and
+## WebP encode to memory; every format saves to a path, dispatched by
+## file extension. Alpha flattens over white for JPEG (the only listed
+## format without alpha); vips errors surface as ExportError.
 
 import std/strutils
 import libvips/api
 import libvips/bindings/vips
 import ./psd/pixels
-import ./pdf/vipsimg
 
 type
   ExportError* = object of CatchableError
@@ -32,6 +30,12 @@ type
 
 proc exportFail(msg: string) {.noreturn.} =
   raise newException(ExportError, msg)
+
+proc ensureVips() =
+  ## libvips needs a one-time process init before any call. Surfaces as
+  ## ExportError so callers see one failure type.
+  if vips_init("opengraphics") != 0:
+    exportFail("libvips failed to initialize")
 
 proc formatForExt*(ext: string): ImageFormat =
   ## Map a file extension (with or without dot, any case) to a format.
@@ -64,15 +68,6 @@ proc toExportPixels*(img: ImageBuf): ExportPixels =
     result.data[4 * i + 1] = char(p.g)
     result.data[4 * i + 2] = char(p.b)
     result.data[4 * i + 3] = char(p.a)
-
-proc toExportPixels*(img: PdfImage): ExportPixels =
-  if img.width <= 0 or img.height <= 0 or img.pixels.len == 0:
-    exportFail("cannot export an empty image")
-  let bands = case img.encoding
-    of ieRGB: 3
-    of ieGray, ieAlpha: 1
-  ExportPixels(width: img.width, height: img.height,
-    bands: bands + (if img.hasAlpha: 1 else: 0), data: img.pixels)
 
 proc flattenWhite(px: ExportPixels): ExportPixels =
   ## Drop alpha over a white background (for JPEG output).
@@ -123,10 +118,6 @@ proc encodeImage*(img: ImageBuf, format: ImageFormat,
     opts = ExportOptions()): string =
   encodeImage(img.toExportPixels(), format, opts)
 
-proc encodeImage*(img: PdfImage, format: ImageFormat,
-    opts = ExportOptions()): string =
-  encodeImage(img.toExportPixels(), format, opts)
-
 proc saveImage*(px: ExportPixels, path: string,
     opts = ExportOptions()) =
   ## Save to path, dispatching on the file extension. JPEG honors
@@ -155,9 +146,5 @@ proc saveImage*(px: ExportPixels, path: string,
     exportFail("libvips save to '" & path & "' failed (" & e.msg & ")")
 
 proc saveImage*(img: ImageBuf, path: string,
-    opts = ExportOptions()) =
-  saveImage(img.toExportPixels(), path, opts)
-
-proc saveImage*(img: PdfImage, path: string,
     opts = ExportOptions()) =
   saveImage(img.toExportPixels(), path, opts)

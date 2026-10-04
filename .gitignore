@@ -9,4 +9,10 @@ testresults/
 !/tests/*.nims
 !/tests/data
 !/tests/data/**
+# ...which also re-includes .DS_Store, since a later rule wins.
+tests/data/.DS_Store
+
+# Outputs written by examples/ and the README snippet.
+/preview.*
+/render.ppm
 

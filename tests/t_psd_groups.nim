@@ -1,6 +1,5 @@
 import unittest
-import ../src/opengraphics/psd/document
-import ../src/opengraphics/psd/layers
+import ../src/opengraphics/psd
 import ./psd_support
 
 proc leaf(name: string, v: byte): TestLayerSpec =
@@ -34,21 +33,21 @@ test "nested groups nest bottom-to-top":
   ])
   let tree = doc.layerTree()
   check tree.len == 2
-  check not tree[0].isGroup
-  check tree[0].layer.name == "BG"
+  check tree[0].kind == lnLayer
+  check tree[0].layer.name() == "BG"
   let outer = tree[1]
-  check outer.isGroup
+  check outer.kind == lnGroup
   check outer.opened
-  check outer.layer.name == "Outer"
+  check outer.layer.name() == "Outer"
   check outer.children.len == 3
-  check outer.children[0].layer.name == "A"
-  check outer.children[2].layer.name == "D"
+  check outer.children[0].layer.name() == "A"
+  check outer.children[2].layer.name() == "D"
   let inner = outer.children[1]
-  check inner.isGroup
-  check inner.layer.name == "Inner"
+  check inner.kind == lnGroup
+  check inner.layer.name() == "Inner"
   check inner.children.len == 2
-  check inner.children[0].layer.name == "B"
-  check inner.children[1].layer.name == "C"
+  check inner.children[0].layer.name() == "B"
+  check inner.children[1].layer.name() == "C"
 
 test "closed folder reports opened=false":
   let doc = docOf(@[
@@ -58,7 +57,7 @@ test "closed folder reports opened=false":
   ])
   let tree = doc.layerTree()
   check tree.len == 1
-  check tree[0].isGroup
+  check tree[0].kind == lnGroup
   check not tree[0].opened
   check tree[0].children.len == 1
 
@@ -67,34 +66,52 @@ test "type 0 divider is a normal layer":
   let tree = doc.layerTree()
   check tree.len == 3
   for n in tree:
-    check not n.isGroup
+    check n.kind == lnLayer
 
-test "lsdk wins over lsct":
+test "lsct takes priority over lsdk":
+  # Both the reference and this implementation read `lsct` first and only fall
+  # back to `lsdk`. An `lsct` of 0 ("other", an ordinary layer) therefore wins
+  # and the group markers do not nest. The old v1 reader had this backwards.
   let doc = docOf(@[
     mark("div", lsct = 0, lsdk = 3),
     leaf("A", 1),
     mark("G", lsct = 1),
   ])
+  # `div` no longer opens a group, so `G` has nothing to close and stands
+  # alone as an empty group at the top level.
+  let tree = doc.layerTree()
+  check tree.len == 3
+  check tree[0].kind == lnLayer
+  check tree[1].kind == lnLayer
+  check tree[2].kind == lnGroup
+  check tree[2].children.len == 0
+
+test "lsdk is used when there is no lsct":
+  let doc = docOf(@[
+    mark("div", lsdk = 3),
+    leaf("A", 1),
+    mark("G", lsdk = 1),
+  ])
   let tree = doc.layerTree()
   check tree.len == 1
-  check tree[0].isGroup
+  check tree[0].kind == lnGroup
   check tree[0].children.len == 1
 
 test "malformed nesting degrades gracefully":
   let stray = docOf(@[mark("G", lsct = 1)]).layerTree()
   check stray.len == 1
-  check stray[0].isGroup
+  check stray[0].kind == lnGroup
   check stray[0].children.len == 0
   let unclosed = docOf(@[mark("div", lsct = 3), leaf("A", 1)]).layerTree()
   check unclosed.len == 1
-  check unclosed[0].isGroup
+  check unclosed[0].kind == lnGroup
   check unclosed[0].children.len == 1
 
 test "empty group":
   let doc = docOf(@[mark("div", lsct = 3), mark("G", lsct = 1)])
   let tree = doc.layerTree()
   check tree.len == 1
-  check tree[0].isGroup
+  check tree[0].kind == lnGroup
   check tree[0].children.len == 0
 
 test "flattenTree is pre-order without dividers":
@@ -109,5 +126,5 @@ test "flattenTree is pre-order without dividers":
   ])
   var names: seq[string] = @[]
   for l in flattenTree(doc.layerTree()):
-    names.add(l.name)
+    names.add(l.name())
   check names == @["BG", "Outer", "A", "Inner", "B"]
