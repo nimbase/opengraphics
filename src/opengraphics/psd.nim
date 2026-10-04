@@ -16,6 +16,7 @@ import psd/samples
 import psd/compression
 import psd/tagged
 import psd/descriptor
+import psd/fills
 import psd/resources
 import psd/layers
 import psd/path
@@ -40,6 +41,7 @@ export samples
 export compression
 export tagged
 export descriptor
+export fills
 export resources
 export layers
 export path

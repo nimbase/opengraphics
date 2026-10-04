@@ -275,7 +275,9 @@ proc clipColor*(c: Rgba): Rgba =
   var r = float32(c.r) / 255.0
   var g = float32(c.g) / 255.0
   var b = float32(c.b) / 255.0
-  let lum = 0.3 * r + 0.59 * g + 0.11 * b
+  # The W3C definition computes `l = Lum(C)` first and then never reads it: the
+  # clip is pure, with no luminosity term. Kept as a comment so the divergence
+  # from `setLum` below does not look like an oversight.
   let n = min(r, min(g, b))
   let x = max(r, max(g, b))
   if n < 0.0:

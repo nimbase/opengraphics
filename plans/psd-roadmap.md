@@ -125,23 +125,57 @@ generated large fixture carries them and `t_psd_fixtures` pins them there.
 
 ## Still open
 
-* `vogk` / `vstk` origination and stroke descriptors, gradient (`GdFl`) and
-  pattern (`PtFl`) fills, adjustment layers (`curv`, `levl`, `hue2`, `blnc`,
-  `expA`), and effect layers (`lfx2` is preserved raw, not interpreted). These
-  are the keys a real shape layer carries and the main remaining breadth.
+* **Rendering** the fill and stroke descriptions. `psd/fills` now reads
+  origination (`vogk`) and stroke (`vstk`) descriptors and answers questions
+  about them -- fill kind, shape bounding box, transform, stroke width and caps
+  -- but draws none of it. That is the remaining work, not the reading.
+* Gradient (`GdFl`) and pattern (`PtFl`) fills, adjustment layers (`curv`,
+  `levl`, `hue2`, `blnc`, `expA`), and effect layers (`lfx2` is preserved raw,
+  not interpreted).
 * Knockout, as above.
 * Embedded smart-object files (`SoLd` and `PlLd` metadata are read; the linked
   asset is not).
 * Read support for `.eps`.
 
+### Traps in the shape-layer blocks
+
+All three of these fail silently -- a wrong lookup returns nothing, the accessor
+substitutes a zero, and the caller cannot tell that from a real value. Each is
+covered by a test in `t_psd_fills`.
+
+* `vogk` is not a bare versioned descriptor. It is `u32 1` followed by an
+  ordinary version-16 descriptor, so the generic entry point reads the marker as
+  a version and rejects the block. The reference implementation makes the same
+  assumption and cannot read `vogk` at all; `t_psd_xref` pins that divergence in
+  both directions.
+* Inside `vogk` the descriptor is wrapped in a `keyDescriptorList` even when
+  there is exactly one entry. Reading `vogk` as though it were the descriptor
+  yields an empty descriptor and no error.
+* The `unitRect` keys are `"Top "`, `Left`, `Btom` and `Rght`. Descriptor keys
+  are a fixed four bytes, so `Top ` is space-padded; `Btom` and `Rght` are
+  misspellings. Read any of them wrong and the bounding box is 0,0,0,0.
+
+### Pattern data is not exercised by anything
+
+Every committed fixture writes a **zero-length** `Patt` block -- Photoshop emits
+the block with a length of 0 when a document has no patterns, which is not a
+parsing bug. `patterns.nim` and `globalPatterns` are therefore correct but
+completely untested against real data, and a `PtFl` fill would have nothing to
+resolve against. Making patterns real means teaching the generated fixture to
+write a populated `Patt`, which is also the only way to test the writer.
+
 A dump of the tagged-block keys present in the committed fixtures is worth
 keeping in mind when choosing: `01.psd` carries `vogk`, `vstk`, `vowv`,
-`lvyr`, `lnk2` and `lnkE`, none of which are interpreted. That file is the only
-fixture with a shape layer, so it is the natural fixture for the next phase.
+`lvyr`, `lnk2` and `lnkE`. Of these only `vogk` and `vstk` are interpreted. That
+file is the only fixture with a shape layer, so it is the natural fixture for
+the fill work above -- and the only one, which is why the tests lean on it so
+heavily.
 
 ## Suggested order
 
 Write support is done, so the remaining work is breadth of interpretation
-rather than surface area: vector masks and knockout in the compositor first,
-since they change the compositing model, then the semantic blocks above, then
-`.eps`.
+rather than surface area. Vector masks are done and knockout is a deliberate
+gap, so the compositor no longer leads. The order is: render the fill and stroke
+descriptions that `psd/fills` can now read, then adjustment layers, then
+`.eps`. Pattern fills slot in wherever it is convenient, but only once the
+generator can write a populated `Patt` to test against.

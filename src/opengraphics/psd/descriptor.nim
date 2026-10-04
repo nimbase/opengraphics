@@ -32,6 +32,21 @@ const
   ## Nesting cap. Deep enough for any real document.
   MaxDescriptorDepth* = 64
   DescriptorVersion* = 16'u32
+  OriginationWrapperVersion* = 1'u32
+    ## The marker that precedes a vector origination descriptor (`vogk`).
+    ##
+    ## Every versioned descriptor is `u32 version` followed by a body, and the
+    ## version is 16. Vector origination data is the exception and is *not*
+    ## written as a bare version: it is `u32 1` followed by an ordinary
+    ## version-16 descriptor. So a shape layer's fill block starts
+    ## `00 00 00 01 00 00 00 10` and its stroke block (`vstk`, same grammar,
+    ## later in the same layer) starts `00 00 00 10`.
+    ##
+    ## Reading `vogk` as a plain descriptor therefore consumes the `1` as the
+    ## version, rejects it as unsupported, and looks for the failure
+    ## somewhere unrelated -- a plausible string length deep in the body. The
+    ## reference implementation has the same assumption and cannot read `vogk`.
+    ## Use `parseOriginationDescriptor`, which handles the wrapper.
   ## Smallest possible item: a 4-byte key, a 4-byte type, 1 byte of value.
   MinDescriptorItemBytes* = 9
 
@@ -684,3 +699,35 @@ proc tryBareDescriptor*(data: Span,
     some(parseDescriptorPrefix(data, limits).descriptor)
   except PsdError:
     none(Descriptor)
+
+proc parseOriginationDescriptor*(data: Span, limits = defaultLimits()):
+    VersionedDescriptor =
+  ## Vector origination data (`vogk`): a `u32 1` marker then an ordinary
+  ## version-16 descriptor.
+  ##
+  ## See `OriginationWrapperVersion` for why this is not just
+  ## `parseVersionedDescriptor`. The returned descriptor is the inner one; its
+  ## `toBytes` is the version-16 body, so a caller re-emitting a whole `vogk`
+  ## block must put the marker back in front.
+  var r = initReader(data)
+  let wrapper = r.readU32BE()
+  if wrapper != OriginationWrapperVersion:
+    invalid("origination marker " & $wrapper & ", expected " &
+      $OriginationWrapperVersion)
+  let inner = r.peekRest()
+  let p = parsePrefixDescriptor(inner, limits)
+  if p.consumed != inner.len:
+    invalid("origination descriptor has " & $(inner.len - p.consumed) &
+      " trailing bytes")
+  p.descriptor
+
+proc parseOriginationDescriptor*(data: string,
+    limits = defaultLimits()): VersionedDescriptor =
+  parseOriginationDescriptor(spanValue(data), limits)
+
+proc originationToBytes*(vd: VersionedDescriptor): string =
+  ## Re-emit a whole `vogk` payload, marker included.
+  var w = initWriter()
+  w.putU32(OriginationWrapperVersion)
+  w.put(vd.toBytes())
+  w.toString()
