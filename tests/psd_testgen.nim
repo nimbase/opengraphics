@@ -520,6 +520,49 @@ proc noisePlane*(w, h, depth: int, seed: uint32): string =
     z = (z xor (z shr 15)) * 0x735A2D97'u32
     result[i] = char(uint8((z xor (z shr 15)) shr 24))
 
+proc testPatterns*(depth: uint16): seq[PsdPattern] =
+  ## Real pattern tiles for the generated fixture's `Patt` block.
+  ##
+  ## Every committed fixture writes a *zero-length* `Patt`, which is correct
+  ## Photoshop behaviour for a document with no patterns, but it means nothing
+  ## anywhere validates a populated one. The generator is the only way to get
+  ## real pattern data into a file without committing a binary, so it does.
+  ## Contents are deterministic and depth-dependent, so a mis-sized plane or a
+  ## swapped channel shows up as a byte mismatch rather than passing quietly.
+  let bpp = max(int(depth) div 8, 1)
+  let cc = modeChannels(3)
+  for spec in [("Checker", 8'u32, 8'u32, false),
+               ("Diagonal", 6'u32, 4'u32, true),
+               ("Solid Ramp", 4'u32, 16'u32, false)]:
+    let (name, w, h, withAlpha) = spec
+    let n = int(w) * int(h) * bpp
+    var pat = PsdPattern(
+      mode: 3, width: w, height: h, name: name,
+      id: "0bd2d3ba-1234-11d4-8f8f-aabbccddee" & name[0],
+      depth: depth)
+    for c in 0 ..< cc:
+      var buf = newSeq[byte](n)
+      for i in 0 ..< n:
+        var v = (uint8(i) * 7'u8 + uint8(c) * 53'u8) and 0xFF'u8
+        if name == "Checker" and ((i div int(w)) + (i mod int(w))) mod 2 == 0:
+          v = 255'u8 - v
+        elif name == "Diagonal" and (i mod int(w)) == c:
+          v = 0'u8
+        elif name == "Solid Ramp":
+          v = uint8((i * 255) div max(n - 1, 1))
+        buf[i] = v
+      pat.channels.add cast[string](buf)
+    if withAlpha:
+      var buf = newSeq[byte](n)
+      for i in 0 ..< n:
+        buf[i] = uint8((i * 255) div max(n - 1, 1)) and 0xFF'u8
+      pat.alpha = some(cast[string](buf))
+    result.add pat
+
+proc patternBlockFor*(depth: uint16): TaggedBlock =
+  ## The `Patt` / `Pat2` / `Pat3` block for `depth`, carrying real tiles.
+  newTaggedBlock(patternBlockKey(depth), writePatternBlock(testPatterns(depth)))
+
 proc largeLayered*(w, h, layerCount: int, version = Version.Psd,
     mode = ColorMode(kind: cmRgb), depth = 8, comp = Rle): PsdFile =
   ## A layered file of roughly `layerCount * w * h * channels` bytes, with
@@ -656,7 +699,8 @@ proc largeLayered*(w, h, layerCount: int, version = Version.Psd,
       padding: none(Span))),
     layerInfoPlacement: LayerInfoPlacement(kind: pkSection),
     globalLayerMask: some(GlobalLayerMask(data: spanOf(newString(20)))),
-    globalBlocks: @[newTaggedBlock("Patt", ""),
+    # A populated pattern block, not the empty one every committed fixture has.
+    globalBlocks: @[patternBlockFor(uint16(depth)),
       newTaggedBlock("Txt2", "\x00\x01\x02\x03")],
     layerMaskTrailing: emptySpan(),
     imageData: MergedImage(compression: comp,

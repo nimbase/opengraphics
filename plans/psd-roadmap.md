@@ -192,14 +192,34 @@ broken vector mask at all, because `01.psd`'s only vector mask covers essentiall
 its whole layer rect: disabling mask application leaves all three rendering
 identically. That is what the generated fixture is for.
 
-### Pattern data is not exercised by anything
+### Pattern data: agreement reached, ground truth still missing
 
 Every committed fixture writes a **zero-length** `Patt` block -- Photoshop emits
 the block with a length of 0 when a document has no patterns, which is not a
-parsing bug. `patterns.nim` and `globalPatterns` are therefore correct but
-completely untested against real data, and a `PtFl` fill would have nothing to
-resolve against. Making patterns real means teaching the generated fixture to
-write a populated `Patt`, which is also the only way to test the writer.
+parsing bug. The generated fixture now writes a **populated** one instead, with
+three tiles at whichever depth the document uses.
+
+What that leaves covered, and what it does not:
+
+* `t_psd_core_patterns` round-trips the module against itself at 8/16/32 bits,
+  with and without alpha, plus `.pat` files and malformed input. This cannot
+  catch a misunderstanding of the format, because writer and reader share one
+  model and so agree even when both are wrong.
+* `t_psd_xref` cross-checks against the reference implementation, which is an
+  independent reading of the same specification. 84 blocks -- three depths times
+  seven colour modes, with and without alpha and with and without a palette --
+  come back byte-identical through it, as does a multi-pattern block whose
+  ordering matters because patterns resolve references by position. This is real
+  evidence, but it is consensus between two implementations, not ground truth.
+* `t_psd_patternfile` covers what neither of the others does: the block surviving
+  the *file* path. `Patt` vs `Pat2` vs `Pat3` selection, the per-pattern length
+  prefix, 4-byte padding, and global-block placement all live in `file.nim` and
+  `tagged.nim` rather than in `patterns.nim`, and a file with patterns now
+  round-trips byte for byte at every depth.
+
+Still missing, and not fixable here: no pattern data has been validated against
+bytes Photoshop actually wrote, because no available file has a populated `Patt`.
+That would need a real document with patterns in it.
 
 A dump of the tagged-block keys present in the committed fixtures is worth
 keeping in mind when choosing: `01.psd` carries `vogk`, `vstk`, `vowv`,

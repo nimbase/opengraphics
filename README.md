@@ -133,6 +133,10 @@ for ab in doc.artboards:
 - Building blocks for high-level libraries and apps compatible with popular graphics formats
 
 See `plans/psd-roadmap.md` for the PSD status and its deliberate limitations.
+`audits/` holds dated audits: measurements taken against real files, what they
+prove, and where they were wrong. `audits/psd-fidelity-2026-10-05.md` records
+how closely the compositor matches Photoshop and why a single match percentage is
+the wrong thing to track.
 
 ### References
 - https://github.com/TheNicker/libpsd

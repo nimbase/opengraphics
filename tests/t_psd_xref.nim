@@ -14,13 +14,17 @@
 ## separate checkout on the user's machine, not a dependency of this package.
 ## Point `OG_ORACLE` at the binary to run it.
 
-import std/[os, osproc, strutils]
+import std/[options, os, osproc, strutils]
 import std/unittest
 import ../src/opengraphics/psd
 
 const
   OracleEnv = "OG_ORACLE"
-  DefaultOracle = "/var/folders/2k/8b2pmhg15lq6853zbt_v_1mw0000gn/T/opencode/psd-oracle/target/release/psd-oracle"
+  # Under the gitignored testresults/ rather than a temp directory: an earlier
+  # version of this harness lived in one and was cleaned up underneath us, at
+  # which point both cross-checks started silently skipping. A guard that stops
+  # guarding without saying so is worse than no guard.
+  DefaultOracle = "testresults/psd-oracle/target/release/psd-oracle"
   Fixtures = ["01.psd", "02.psd", "03.psd"]
 
   DescriptorKeys = ["vogk", "vstk", "GdFl", "PtFl", "lfx2", "SoCo", "SoLd",
@@ -36,6 +40,17 @@ proc oraclePath(): string =
   let p = getEnv(OracleEnv)
   result = if p.len > 0: p else: DefaultOracle
 
+proc requireOracle(): bool =
+  ## True when the harness is present. Echoes loudly when it is not, because
+  ## `skip()` takes no message and would otherwise leave the suite quietly
+  ## reporting success while checking nothing against the reference.
+  if fileExists(oraclePath()):
+    return true
+  echo "NOTE: cross-checks against the reference are SKIPPED. Harness not built at ",
+    oraclePath(), ". Build it with:"
+  echo "  cd testresults/psd-oracle && cargo build --release"
+  false
+
 # `vogk` is the one key whose payload is not a bare versioned descriptor: it
 # carries a leading `u32 1` marker, so it needs its own entry point. Getting
 # this wrong is silent -- the marker is read as a version, and the parse then
@@ -49,6 +64,36 @@ proc reemit(b: Blob): string =
   if b.key == "vogk":
     return parseOriginationDescriptor(b.data).originationToBytes()
   parseVersionedDescriptor(b.data).toBytes()
+
+proc xrefPattern(depth: uint16, mode: uint32, withAlpha, paletted: bool): PsdPattern =
+  ## A tile with distinctive, depth- and mode-dependent contents so that a
+  ## mis-sized plane or a swapped channel cannot survive a round trip.
+  let cc = modeChannels(mode)
+  let w = if mode == 1: 4'u32 else: 7'u32
+  let h = 3'u32
+  let bpp = max(int(depth) div 8, 1)
+  result = PsdPattern(
+    mode: mode, width: w, height: h,
+    name: "d" & $depth & " m" & $mode & (if withAlpha: " a" else: "") &
+      (if paletted: " p" else: ""),
+    id: "0bd2d3ba-1234-11d4-8f8f-aabbccddeeff",
+    depth: depth)
+  let n = int(w) * int(h) * bpp
+  for c in 0 ..< cc:
+    var buf = newSeq[byte](n)
+    for i in 0 ..< n:
+      buf[i] = (uint8(i) * 7'u8 + uint8(c) * 53'u8 + uint8(mode)) and 0xFF'u8
+    result.channels.add cast[string](buf)
+  if withAlpha:
+    var buf = newSeq[byte](n)
+    for i in 0 ..< n:
+      buf[i] = (uint8(i) * 3'u8 + 11'u8) and 0xFF'u8
+    result.alpha = some(cast[string](buf))
+  if paletted:
+    var buf = newSeq[byte](768)
+    for i in 0 ..< 768:
+      buf[i] = uint8(i) and 0xFF'u8
+    result.palette = some(cast[string](buf))
 
 proc collectDescriptors(): seq[Blob] =
   ## Every tagged block in every fixture whose payload parses as a descriptor.
@@ -108,7 +153,7 @@ suite "descriptor agreement with the reference implementation":
     # skip carries on and execs a missing binary, which fails the very test it
     # just said was not applicable.
     let oracle = oraclePath()
-    if fileExists(oracle):
+    if requireOracle():
       var checked = 0
       for b in collectDescriptors():
         if b.key == "vogk":
@@ -140,7 +185,7 @@ suite "descriptor agreement with the reference implementation":
       check b.reemit() == b.data
       check parseOriginationDescriptor(b.data).descriptor.items.len > 0
     let oracle = oraclePath()
-    if fileExists(oracle):
+    if requireOracle():
       for b in blobs:
         # Theirs: refuses it.
         let tmpIn = getTempDir() / "xref_vogk.bin"
@@ -151,3 +196,59 @@ suite "descriptor agreement with the reference implementation":
         check code != 0
     else:
       skip() # reference harness not built; see OG_ORACLE
+suite "pattern block agreement with the reference implementation":
+  test "the reference reads a Patt block exactly as we wrote it":
+    # The round-trip tests in `t_psd_core_patterns` already cover every depth and
+    # the alpha/palette variants, but writer and reader share one model of the
+    # format, so they agree with each other even when both are wrong. This is the
+    # only check that says anything: the reference is an independent reading of
+    # the same specification, so agreement is evidence and disagreement is a bug
+    # in one of the two. It is still consensus rather than ground truth --
+    # nothing here has been validated against bytes Photoshop wrote, because no
+    # fixture has a populated `Patt`.
+    if not requireOracle():
+      skip()
+    let oracle = oraclePath()
+    var checked = 0
+    for depth in [8'u16, 16, 32]:
+      for mode in [1'u32, 2, 3, 4, 7, 8, 9]:
+        for withAlpha in [false, true]:
+          for paletted in [false, true]:
+            let blk = writePatternBlock(@[xrefPattern(depth, mode, withAlpha, paletted)])
+            let tmpIn = getTempDir() / ("pat_in_" & $checked & ".bin")
+            let tmpOut = getTempDir() / ("pat_out_" & $checked & ".bin")
+            writeFile(tmpIn, blk)
+            let (_, code) = execCmdEx(oracle & " patterns " & quoteShell(tmpIn) &
+              " " & quoteShell(tmpOut))
+            check code == 0
+            check readFile(tmpOut) == blk
+            removeFile(tmpIn)
+            removeFile(tmpOut)
+            inc checked
+    check checked == 3 * 7 * 2 * 2
+
+  test "several patterns in one block agree too":
+    # Order matters: a pattern fills reference its index and id by position, so a
+    # block whose patterns come back reordered would resolve fills wrongly even
+    # though every individual pattern survived.
+    if not requireOracle():
+      skip()
+    let oracle = oraclePath()
+    let ps = @[
+      xrefPattern(8, 3, false, false),
+      xrefPattern(8, 3, true, false),
+      xrefPattern(16, 3, false, false),
+      xrefPattern(32, 4, true, true)]
+    let blk = writePatternBlock(ps)
+    let tmpIn = getTempDir() / "pat_multi_in.bin"
+    let tmpOut = getTempDir() / "pat_multi_out.bin"
+    writeFile(tmpIn, blk)
+    let (outp, code) = execCmdEx(oracle & " patterns " & quoteShell(tmpIn) &
+      " " & quoteShell(tmpOut))
+    check code == 0
+    check readFile(tmpOut) == blk
+    # And the reference saw the same names in the same order.
+    for p in ps:
+      check outp.find(p.name) >= 0
+    removeFile(tmpIn)
+    removeFile(tmpOut)
