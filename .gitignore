@@ -16,3 +16,6 @@ tests/data/.DS_Store
 /preview.*
 /render.ppm
 
+# Local planning docs live here and stay out of the repo.
+/plans/
+
