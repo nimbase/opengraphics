@@ -5,3 +5,22 @@ jobs:
     uses: nimbase/setup-nim-action/.github/workflows/test_clue.yml@main
     with:
       nim-version: stable
+      pre-install-command: |
+        # libvips has a different package name on each runner OS.
+        case "${RUNNER_OS}" in
+          Linux)
+            sudo apt-get update
+            sudo apt-get install -y libvips-dev
+            ;;
+          macOS)
+            brew install vips
+            ;;
+          Windows)
+            winget install --id libvips.libvips -e --silent \
+              --accept-package-agreements --accept-source-agreements
+            ;;
+          *)
+            echo "unsupported runner OS: ${RUNNER_OS}" >&2
+            exit 1
+            ;;
+        esac
