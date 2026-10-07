@@ -124,6 +124,35 @@ for ab in doc.artboards:
   echo "  [", ab.index, "] ", ab.width, "x", ab.height, "pt"
 ```
 
+### Vector artwork: read, manipulate, write
+```nim
+import opengraphics/ai
+
+# PDF-compatible .ai content streams become editable vector artwork:
+# one artboard and one layer per page, paths with fills and strokes,
+# clipping groups, axial/radial shadings as gradients, placed-image
+# references, and text placeholders. Everything approximated is listed
+# in `vec.warnings`, never dropped silently.
+var vec = readAiVectors("artwork.ai")
+echo "artboards: ", vec.artboards.len, " warnings: ", vec.warnings.len
+for layer in vec.layers:
+  for n in layer.children:
+    if n.kind == vnkPath:
+      echo "path with ", n.path.subs.len, " subpaths"
+
+# Write it back as PDF-compatible .ai (one page per artboard).
+var rep = writeAi(vec)
+writeFile("copy.ai", rep.bytes)
+for w in rep.warnings:
+  echo "write: ", w
+```
+
+Legacy EPS-based `.ai` (pre-Illustrator 9) reads its envelope only
+(bounding box, preview, version markers); interpreting the PostScript
+program is out of scope and fails loudly. No `/AIPrivateData` is ever
+written: generated files carry PDF-compatible artwork, not native
+Illustrator edit state.
+
 ## Roadmap
 - Read support for `.eps` and more
 - Writers for the remaining formats (PSD is done)

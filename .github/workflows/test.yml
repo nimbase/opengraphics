@@ -6,7 +6,10 @@ jobs:
     with:
       nim-version: stable
       pre-install-command: |
-        # libvips has a different package name on each runner OS.
+        # System libvips for the Nim bindings, which resolve compile flags
+        # through `pkg-config ... --cflags/--libs vips` at compile time.
+        # MSYS2 UCRT64 is used on Windows so headers, libraries, and .pc
+        # files share one coherent prefix.
         case "${RUNNER_OS}" in
           Linux)
             sudo apt-get update
@@ -16,8 +19,11 @@ jobs:
             brew install vips
             ;;
           Windows)
-            winget install --id libvips.libvips -e --silent \
-              --accept-package-agreements --accept-source-agreements
+            C:/msys64/usr/bin/pacman -Sy --noconfirm
+            C:/msys64/usr/bin/pacman -S --noconfirm --needed \
+              mingw-w64-ucrt-x86_64-pkg-config \
+              mingw-w64-ucrt-x86_64-libvips
+            echo "C:/msys64/ucrt64/bin" >> "$GITHUB_PATH"
             ;;
           *)
             echo "unsupported runner OS: ${RUNNER_OS}" >&2
