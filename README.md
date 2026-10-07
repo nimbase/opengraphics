@@ -131,8 +131,12 @@ import opengraphics/ai
 # PDF-compatible .ai content streams become editable vector artwork:
 # one artboard and one layer per page, paths with fills and strokes,
 # clipping groups, axial/radial shadings as gradients, placed-image
-# references, and text placeholders. Everything approximated is listed
-# in `vec.warnings`, never dropped silently.
+# references, and decoded text runs (string, origin, size, font).
+# Runs from embedded fonts also carry HarfBuzz-shaped glyphs and baked
+# outlines, which is what the writer emits (text without outlines is
+# skipped loudly, images are skipped loudly).
+# Everything approximated is listed in `vec.warnings`, never dropped
+# silently.
 var vec = readAiVectors("artwork.ai")
 echo "artboards: ", vec.artboards.len, " warnings: ", vec.warnings.len
 for layer in vec.layers:

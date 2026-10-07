@@ -1,4 +1,5 @@
 import std/math
+import std/os
 import std/strutils
 import unittest
 import ../src/opengraphics/ai
@@ -92,6 +93,38 @@ test "hidden layers are skipped loudly":
   let rep = writeAi(doc)
   check rep.warnings.len == 1
   check "hidden layer" in rep.warnings[0]
+
+test "shaped text writes as outlines and rereads as paths":
+  let bytes = readFile("tests" / "data" / "fonts" / "ai-micro.ttf")
+  var sf = openShapedFont(bytes)
+  defer: close(sf)
+  var shaped = ShapedText()
+  shapeInto(sf, "Hi", shaped)
+  var doc = VecDocument()
+  doc.artboards.add(VecArtboard(rect: vecRect(0, 0, 200, 100)))
+  var layer = VecLayer(name: "L", visible: true, locked: false)
+  layer.children.add(VecNode(kind: vnkText, name: "", opacity: 1.0,
+    xform: translateXform(20, 30), text: "Hi",
+    fontName: "DejaVuSans", fontSize: 10.0,
+    textFill: solidPaint(rgbColor(0, 1, 0)),
+    glyphs: toVecGlyphs(shaped, 10.0),
+    outline: bakeOutline(sf, shaped.glyphs, 10.0)))
+  doc.layers.add(layer)
+  let rep = writeAi(doc)
+  check rep.warnings.len == 0
+  check "Tj" notin rep.bytes # text truly outlined: no text operators
+  let back = readAiVectors(rep.bytes)
+  check back.layers[0].children.len == 1
+  let n = back.layers[0].children[0]
+  check n.kind == vnkPath # outlines reread as plain paths, not text
+  check n.fill.kind == vpkSolid
+  check close(n.fill.solid.g, 1.0)
+  let b = pathBounds(n.path)
+  # 10pt run at (20,30): x starts at the origin, the baseline (local
+  # y 0) flips to y-down 30, cap height rises above it
+  check b.x0 >= 20.0 and b.x0 < 21.0
+  check close(b.y1, 30.0)
+  check b.x1 - b.x0 > 5.0 # a real "Hi", not a sliver
 
 test "no artboards fails":
   var doc = VecDocument()

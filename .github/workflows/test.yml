@@ -6,23 +6,27 @@ jobs:
     with:
       nim-version: stable
       pre-install-command: |
-        # System libvips for the Nim bindings, which resolve compile flags
-        # through `pkg-config ... --cflags/--libs vips` at compile time.
-        # MSYS2 UCRT64 is used on Windows so headers, libraries, and .pc
-        # files share one coherent prefix.
+        # System libraries for the Nim bindings, which resolve compile
+        # flags through `pkg-config ...` at compile time: libvips (image
+        # decode and color) and HarfBuzz (glyph shaping and outlines).
+        # Only `pkg-config harfbuzz` is queried (the shaping code links
+        # no subset/icu APIs), so distro HarfBuzz is fine; no source
+        # build needed. MSYS2 UCRT64 is used on Windows so headers,
+        # libraries, and .pc files share one coherent prefix.
         case "${RUNNER_OS}" in
           Linux)
             sudo apt-get update
-            sudo apt-get install -y libvips-dev
+            sudo apt-get install -y libvips-dev libharfbuzz-dev
             ;;
           macOS)
-            brew install vips
+            brew install pkgconf vips harfbuzz
             ;;
           Windows)
             C:/msys64/usr/bin/pacman -Sy --noconfirm
             C:/msys64/usr/bin/pacman -S --noconfirm --needed \
               mingw-w64-ucrt-x86_64-pkg-config \
-              mingw-w64-ucrt-x86_64-libvips
+              mingw-w64-ucrt-x86_64-libvips \
+              mingw-w64-ucrt-x86_64-harfbuzz
             echo "C:/msys64/ucrt64/bin" >> "$GITHUB_PATH"
             ;;
           *)

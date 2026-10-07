@@ -118,6 +118,16 @@ type
   VecNodeKind* = enum
     vnkGroup, vnkPath, vnkImage, vnkText, vnkClip
 
+  VecGlyph* = object
+    ## One shaped glyph, in run-local text-space points: the pen starts
+    ## at the run origin and each glyph offsets from its pen position.
+    ## Empty when the run was never shaped (no embedded program).
+    glyphId*: int
+    cluster*: int ## byte index into the run string
+    dx*: float64 ## pen-relative offset, x
+    dy*: float64 ## pen-relative offset, y (y-down)
+    advance*: float64 ## horizontal advance to the next pen, in points
+
   VecNode* = ref object
     ## A single artwork object. `xform` places the node in its parent's
     ## space; `opacity` multiplies everything the node paints.
@@ -140,6 +150,11 @@ type
       fontName*: string
       fontSize*: float64
       textFill*: VecPaint
+      glyphs*: seq[VecGlyph]
+      outline*: Option[VecPath]
+        ## The run drawn as paths in run-local space (origin at the run
+        ## origin, y-down, points). Some when an embedded program made
+        ## outlining possible; the writer emits it, else skips the run.
     of vnkClip:
       clip*: VecPath
       clipRule*: VecFillRule

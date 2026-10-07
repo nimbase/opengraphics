@@ -318,8 +318,13 @@ proc emitNode(w: var Writer, n: VecNode, xf: VecXform, opacity: float64,
     noteLoss(doc, r, "image '" & n.imageKey &
       "' keeps no pixels in the model; not written")
   of vnkText:
-    noteLoss(doc, r, "text placeholder '" & n.text &
-      "' has no glyphs in the model; not written")
+    if n.outline.isSome:
+      var p = n.outline.get()
+      emitPainted(w, p, n.textFill, defaultStroke(), false, nx, no,
+        board, doc, r, outp)
+    else:
+      noteLoss(doc, r, "text '" & n.text &
+        "' has no baked outline; not written")
 
 proc writeAi*(doc: var VecDocument, title = ""): AiWriteReport =
   ## A vector document to PDF-compatible `.ai` bytes. Content streams

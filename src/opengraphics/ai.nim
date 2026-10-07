@@ -6,6 +6,7 @@ import ai/detect
 import ai/pages
 import ai/xmp
 import ai/pdfcompat
+import ai/shape
 import ai/content
 import ai/legacy
 import ai/write
@@ -17,6 +18,7 @@ export detect
 export pages
 export xmp
 export pdfcompat
+export shape
 export content
 export legacy
 export write

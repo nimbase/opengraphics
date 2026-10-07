@@ -12,21 +12,24 @@
 ## keeps its own fold state because `WalkedOp` carries the CTM and
 ## resources but not the paint state.
 ##
-## Honest limits, all warned per document: text is a positioned
-## placeholder run (no glyph metrics, WinAnsi-ish bytes kept verbatim);
-## images keep their resource name and placement, not their pixels;
-## shading functions beyond exponential are sampled; tiling patterns
-## keep their name, not their tile; `gs` graphics parameters are not
-## applied.
+## Honest limits, all warned per document: text runs carry decoded
+## strings, origins, size and font, but glyph-level layout (shaping,
+## render modes) is not modeled; images keep their resource name and
+## placement, not their pixels; shading functions beyond exponential
+## are sampled; tiling patterns keep their name, not their tile; `gs`
+## graphics parameters are not applied.
 
 import std/math
+import std/options
 import std/tables
 import opendocs/pdf/cos
 import opendocs/pdf/docmodel
 import opendocs/pdf/gstate
+import opendocs/pdf/text
 import opendocs/pdf/types
 import ../vector
 import ./pdfcompat
+import ./shape
 import ./types
 
 export vector
@@ -36,6 +39,17 @@ type
     depth*: int
     path*: VecPath
     rule*: VecFillRule
+
+  SavedPaint = object
+    ## Nonstroking and stroking paint state saved across `q`/`Q`,
+    ## mirroring the PDF graphics state my fold would otherwise leak.
+    fill*: VecPaint
+    stroke*: VecStroke
+    hasStroke*: bool
+    fillSpace*: VecColorSpace
+    strokeSpace*: VecColorSpace
+    fillCSName*: string
+    strokeCSName*: string
 
   FoldState = object
     subs*: seq[VecSubPath] ## finished subpaths of the current path
@@ -50,14 +64,16 @@ type
     strokeSpace*: VecColorSpace
     fillCSName*: string
     strokeCSName*: string
+    saved*: seq[SavedPaint]
     clips*: seq[ClipEntry]
     depth*: int
-    inText*: bool
-    fontName*: string
-    fontSize*: float64
-    textMatrix*: VecXform
-    textLine*: VecXform
-    leading*: float64
+    fontBytes*: Table[string, string]
+      ## Embedded programs by "depth/fontName", resolved once per font.
+    fonts*: Table[string, ShapedFont]
+      ## Open faces by the same key; closed when the page fold ends.
+      ## Entries are pointer owners: never close a copy, only the table.
+    deadFonts*: Table[string, bool]
+      ## Fonts already reported unshapable, so each warns once.
 
 proc flipFor*(pageH: float64): VecXform =
   ## PDF y-up to model y-down for a page of height `pageH`.
@@ -246,12 +262,102 @@ proc shadingGradient(d: var PdfDoc, sh: CosObj,
       xform: identityXform(), objectBoundingBox: false, spread: vspPad,
       cx: cn(3), cy: cn(4), r: cn(5), fx: cn(0), fy: cn(1))
 
-proc textOrigin(st: FoldState, ctm: VecXform,
-    pageH: float64): VecPt =
-  ## The text-line origin in model space. Glyph advances are not
-  ## modeled, so multi-glyph runs share one origin plus a warning.
-  applyXform(deviceXform(ctm, pageH),
-    vecPt(st.textMatrix[4], st.textMatrix[5]))
+proc savePaint(st: var FoldState) =
+  st.saved.add(SavedPaint(fill: st.fill, stroke: st.stroke,
+    hasStroke: st.hasStroke, fillSpace: st.fillSpace,
+    strokeSpace: st.strokeSpace, fillCSName: st.fillCSName,
+    strokeCSName: st.strokeCSName))
+
+proc restorePaint(st: var FoldState) =
+  if st.saved.len == 0: return
+  let s = st.saved[^1]
+  st.saved.setLen(st.saved.len - 1)
+  st.fill = s.fill
+  st.stroke = s.stroke
+  st.hasStroke = s.hasStroke
+  st.fillSpace = s.fillSpace
+  st.strokeSpace = s.strokeSpace
+  st.fillCSName = s.fillCSName
+  st.strokeCSName = s.strokeCSName
+
+proc fontDictFor(d: var PdfDoc, res: CosObj,
+    name: string): CosObj =
+  ## The font dictionary for `name` in resource frame `res`, mirroring
+  ## the lookup inside opendocs `decoderFor` so shaping sees the same
+  ## font the decoder saw — including a form's shadowed `/F1`.
+  var fonts = res.dictGet("Font")
+  if fonts.kind == coRef:
+    fonts = d.resolve(fonts)
+  if fonts.kind != coDict:
+    return CosObj(kind: coNull)
+  var r = fonts.dictGet(name)
+  if r.kind == coRef:
+    r = d.resolve(r)
+  r
+
+proc fontKeyFor(depth: int, name: string): string =
+  $depth & "/" & name
+
+proc shapeRunFor(d: var PdfDoc, wo: WalkedOp, fontName: string,
+    run: TextRun, st: var FoldState,
+    doc: var VecDocument): tuple[glyphs: seq[VecGlyph],
+      outline: Option[VecPath]] =
+  ## Shape one run through its frame's embedded program. Missing or
+  ## broken programs warn once per font and leave the run unshaped;
+  ## origins never depend on shaping, so they stay `extractText`-exact.
+  let key = fontKeyFor(wo.depth, fontName)
+  if key in st.deadFonts:
+    return (@[], none(VecPath))
+  if key notin st.fontBytes:
+    try:
+      let fd = fontDictFor(d, wo.resources, fontName)
+      if fd.kind == coNull:
+        raise newException(ShapeError,
+          "font /" & fontName & " missing from /Resources")
+      st.fontBytes[key] = embeddedFontBytes(fd, d)
+    except CatchableError as e:
+      doc.warn("font '" & fontName & "' cannot shape runs (" &
+        e.msg & "); Widths-based advances kept, no outlines")
+      st.deadFonts[key] = true
+      return (@[], none(VecPath))
+  if key notin st.fonts:
+    try:
+      st.fonts[key] = openShapedFont(st.fontBytes[key])
+    except CatchableError as e:
+      doc.warn("font '" & fontName & "' cannot shape runs (" &
+        e.msg & "); Widths-based advances kept, no outlines")
+      st.deadFonts[key] = true
+      return (@[], none(VecPath))
+  var shaped = ShapedText()
+  shapeInto(st.fonts[key], run.text, shaped)
+  (toVecGlyphs(shaped, run.size),
+    bakeOutline(st.fonts[key], shaped.glyphs, run.size))
+
+proc emitTextRun(d: var PdfDoc, wo: WalkedOp, run: TextRun,
+    st: var FoldState, pageH: float64, nodes: var seq[VecNode],
+    doc: var VecDocument) =
+  ## An extracted run to a text node: decoded string, origin flipped to
+  ## model space, size, font, active fill, plus shaped glyphs and a
+  ## baked outline when the font is embedded.
+  let (glyphs, outline) = shapeRunFor(d, wo, run.fontName, run, st, doc)
+  doc.warn("text runs carry decoded strings, origins, size, font, and " &
+    "HarfBuzz-shaped glyphs plus outlines when the font is embedded; " &
+    "render modes are not modeled")
+  nodes.add(wrapClips(VecNode(kind: vnkText, name: "", opacity: 1.0,
+    xform: translateXform(run.x, pageH - run.y), text: run.text,
+    fontName: run.fontName, fontSize: run.size, textFill: st.fill,
+    glyphs: glyphs, outline: outline), st, 1.0))
+
+proc showRun(d: var PdfDoc, wo: WalkedOp, tgs: var GState,
+    decoders: var Table[string, FontDecoder], s: string, st: var FoldState,
+    pageH: float64, nodes: var seq[VecNode], doc: var VecDocument) =
+  ## Decode one shown string through the frame-aware decoder and emit
+  ## its run, dropping it exactly when `extractText` would (outside the
+  ## enclosing form's /BBox). Text-matrix advances happen inside, so
+  ## later origins stay correct.
+  let run = d.showTextRun(wo, tgs, decoders, s)
+  if run.isSome:
+    emitTextRun(d, wo, run.get(), st, pageH, nodes, doc)
 
 proc emitPaint(st: var FoldState, strokeIt: bool,
     rule: VecFillRule, wo: WalkedOp, pageH: float64,
@@ -304,10 +410,14 @@ proc patternPaint(d: var PdfDoc, res: CosObj, name: string,
 proc foldPage*(d: var PdfDoc, pageIdx: int, pageH: float64,
     doc: var VecDocument): seq[VecNode] =
   ## One page's walked operators to artwork nodes in model space.
+  ## Text state replays through a real opendocs graphics state so font
+  ## selection, matrices, and advances match `extractText` exactly;
+  ## paint and clipping stay in the fold state below.
   var st = FoldState(fill: solidPaint(rgbColor(0, 0, 0)),
-    stroke: defaultStroke(), fontSize: 12.0,
-    fillSpace: vcsRGB, strokeSpace: vcsRGB,
-    textMatrix: identityXform(), textLine: identityXform())
+    stroke: defaultStroke(),
+    fillSpace: vcsRGB, strokeSpace: vcsRGB)
+  var tgs = initGState()
+  var decoders = initTable[string, FontDecoder]()
   var nodes: seq[VecNode] = @[]
   var warnedOps = initTable[string, bool]()
   template warnOp(opname, msg: string) =
@@ -317,12 +427,51 @@ proc foldPage*(d: var PdfDoc, pageIdx: int, pageH: float64,
   let ops = d.walkNested(pageIdx)
   for wo in ops:
     let op = wo.op
+    if op.name == "Tj":
+      if op.operands.len != 1 or op.operands[0].kind != coStr:
+        raise newException(AiError, "Tj needs one string operand")
+      showRun(d, wo, tgs, decoders, op.operands[0].sval, st,
+        pageH, nodes, doc)
+      continue
+    if op.name == "TJ":
+      if op.operands.len != 1 or op.operands[0].kind != coArray:
+        raise newException(AiError, "TJ needs one array operand")
+      for item in op.operands[0].items:
+        if item.kind == coStr:
+          showRun(d, wo, tgs, decoders, item.sval, st,
+            pageH, nodes, doc)
+        else:
+          let th = tgs.text.scale / 100.0
+          let t: array[6, float64] = [1.0, 0.0, 0.0, 1.0,
+            -item.asFloat() * tgs.text.fontSize * th / 1000.0, 0.0]
+          tgs.textMatrix = concatXform(t, tgs.textMatrix)
+      continue
+    if op.name == "'":
+      if op.operands.len != 1 or op.operands[0].kind != coStr:
+        raise newException(AiError, "' needs one string operand")
+      tgs.applyOp(ContentOp(name: "T*"))
+      showRun(d, wo, tgs, decoders, op.operands[0].sval, st,
+        pageH, nodes, doc)
+      continue
+    if op.name == "\"":
+      if op.operands.len != 3 or op.operands[2].kind != coStr:
+        raise newException(AiError,
+          "\" needs word/char spacing plus a string")
+      tgs.text.wordSpace = op.operands[0].asFloat()
+      tgs.text.charSpace = op.operands[1].asFloat()
+      tgs.applyOp(ContentOp(name: "T*"))
+      showRun(d, wo, tgs, decoders, op.operands[2].sval, st,
+        pageH, nodes, doc)
+      continue
+    tgs.applyOp(op)
     case op.name
     of "q":
       inc st.depth
+      savePaint(st)
     of "Q":
       st.depth = max(0, st.depth - 1)
       dropClipsTo(st, st.depth)
+      restorePaint(st)
     of "m":
       if st.hasOpen:
         st.subs.add(st.open)
@@ -522,72 +671,13 @@ proc foldPage*(d: var PdfDoc, pageIdx: int, pageH: float64,
         stroke: defaultStroke(), hasStroke: false), st, 1.0))
       doc.warn("shading '" & nameOp(op, 0) &
         "' paints its whole artboard box, not its true extent")
-    of "BT":
-      st.inText = true
-      st.textMatrix = identityXform()
-      st.textLine = identityXform()
-    of "ET":
-      st.inText = false
-    of "Tm":
-      st.textMatrix = [num(op, 0), num(op, 1), num(op, 2),
-        num(op, 3), num(op, 4), num(op, 5)]
-      st.textLine = st.textMatrix
-    of "Td":
-      let t = translateXform(num(op, 0), num(op, 1))
-      st.textLine = concatXform(t, st.textLine)
-      st.textMatrix = st.textLine
-    of "TD":
-      st.leading = -num(op, 1)
-      let t = translateXform(num(op, 0), num(op, 1))
-      st.textLine = concatXform(t, st.textLine)
-      st.textMatrix = st.textLine
-    of "T*":
-      let t = translateXform(0, -st.leading)
-      st.textLine = concatXform(t, st.textLine)
-      st.textMatrix = st.textLine
-    of "Tf":
-      st.fontName = nameOp(op, 0)
-      st.fontSize = num(op, 1)
-    of "Tj", "'":
-      if op.operands.len >= 1 and op.operands[0].kind == coStr:
-        let o = textOrigin(st, wo.ctm, pageH)
-        let n = VecNode(kind: vnkText, name: "", opacity: 1.0,
-          xform: translateXform(o.x, o.y), text: op.operands[0].sval,
-          fontName: st.fontName, fontSize: st.fontSize, textFill: st.fill)
-        doc.warn("text kept as positioned placeholder runs; no glyph " &
-          "metrics, kerning, or encoding resolution")
-        nodes.add(wrapClips(n, st, 1.0))
-    of "TJ":
-      if op.operands.len >= 1 and op.operands[0].kind == coArray:
-        var s = ""
-        for item in op.operands[0].items:
-          if item.kind == coStr: s.add(item.sval)
-        let n = VecNode(kind: vnkText, name: "", opacity: 1.0,
-          xform: identityXform(), text: s,
-          fontName: st.fontName, fontSize: st.fontSize, textFill: st.fill)
-        doc.warn("text kept as positioned placeholder runs; no glyph " &
-          "metrics, kerning, or encoding resolution")
-        let o = textOrigin(st, wo.ctm, pageH)
-        n.xform = translateXform(o.x, o.y)
-        nodes.add(wrapClips(n, st, 1.0))
-    of "\"":
-      warnOp(op.name, "the \" operator sets word and char spacing, " &
-        "which placeholder text does not model")
-      if op.operands.len >= 3 and op.operands[2].kind == coStr:
-        let n = VecNode(kind: vnkText, name: "", opacity: 1.0,
-          xform: identityXform(), text: op.operands[2].sval,
-          fontName: st.fontName, fontSize: st.fontSize, textFill: st.fill)
-        let o = textOrigin(st, wo.ctm, pageH)
-        n.xform = translateXform(o.x, o.y)
-        nodes.add(wrapClips(n, st, 1.0))
-    of "Tc", "Tw", "Tz", "TL", "Tr", "Ts":
-      if op.name == "TL": st.leading = num(op, 0)
-      discard
     of "BMC", "BDC", "EMC", "BX", "EX", "MP", "DP", "cm":
       discard
     else:
       warnOp(op.name, "operator '" & op.name &
         "' is not mapped to vector artwork; skipped")
+  for _, sf in st.fonts.mpairs:
+    close(sf)
   nodes
 
 proc readAiVectors*(data: string): VecDocument =
@@ -605,6 +695,9 @@ proc readAiVectors*(data: string): VecDocument =
     try:
       layer.children = foldPage(d, i, boxes[i].height, result)
     except AiError as e:
+      raise newException(AiError,
+        "page " & $(i + 1) & " vector extraction failed: " & e.msg)
+    except PdfError as e:
       raise newException(AiError,
         "page " & $(i + 1) & " vector extraction failed: " & e.msg)
     result.layers.add(layer)
