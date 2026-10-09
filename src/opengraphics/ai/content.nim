@@ -3,7 +3,10 @@
 ## Folds the resource-aware `WalkedOp` sequences from opendocs into
 ## `VecDocument`: path construction and painting, solid paints, axial and
 ## radial shadings, clipping paths, placed-image references, and text
-## placeholders. Each page becomes one artboard and one layer.
+## placeholders. Each page becomes one artboard; without optional
+## content groups it also becomes one layer, otherwise marked art routes
+## to one layer per group (see `ocg`) and the rest stays on the page
+## layer.
 ##
 ## Two coordinate facts matter. PDF user space is y-up; the vector model
 ## is y-down, so every painted path is transformed by the op's CTM
@@ -13,11 +16,14 @@
 ## resources but not the paint state.
 ##
 ## Honest limits, all warned per document: text runs carry decoded
-## strings, origins, size and font, but glyph-level layout (shaping,
+## strings, origins, size, font, but glyph-level layout (shaping,
 ## render modes) is not modeled; images keep their resource name and
 ## placement, not their pixels; shading functions beyond exponential
 ## are sampled; tiling patterns keep their name, not their tile; `gs`
-## graphics parameters are not applied.
+## graphics parameters are not applied; inline (reference-less) OCG
+## dictionaries keep no cross-page identity, so their art stays on the
+## page layer; membership-dictionary policies approximate to routing by
+## the first group.
 
 import std/math
 import std/options
@@ -29,6 +35,7 @@ import opendocs/pdf/text
 import opendocs/pdf/types
 import ../vector
 import ./pdfcompat
+import ./ocg
 import ./shape
 import ./types
 
@@ -51,6 +58,19 @@ type
     fillCSName*: string
     strokeCSName*: string
 
+  OcScope = object
+    ## One open marked-content sequence: the group its art routes to
+    ## (-1 for the page layer) and the q-depth that closes it.
+    group*: int
+    depth*: int
+
+  OcSink = object
+    ## Where folded nodes land: ungrouped art returns through the
+    ## caller's `nodes`, grouped art accumulates here in encounter
+    ## order for readAiVectors to attach to group layers.
+    order*: seq[int]
+    buckets*: Table[int, seq[VecNode]]
+
   FoldState = object
     subs*: seq[VecSubPath] ## finished subpaths of the current path
     open*: VecSubPath      ## subpath under construction
@@ -67,6 +87,8 @@ type
     saved*: seq[SavedPaint]
     clips*: seq[ClipEntry]
     depth*: int
+    ocStack*: seq[OcScope]
+      ## Open marked-content scopes; the top routes the next node.
     fontBytes*: Table[string, string]
       ## Embedded programs by "depth/fontName", resolved once per font.
     fonts*: Table[string, ShapedFont]
@@ -74,6 +96,36 @@ type
       ## Entries are pointer owners: never close a copy, only the table.
     deadFonts*: Table[string, bool]
       ## Fonts already reported unshapable, so each warns once.
+
+  FoldedPage* = object
+    ## One page's artwork, split by routing: `top` is unmarked art for
+    ## the page layer, `grouped` maps group indices to their art in
+    ## first-encounter `order`.
+    top*: seq[VecNode]
+    order*: seq[int]
+    grouped*: Table[int, seq[VecNode]]
+
+proc emit(sink: var OcSink, nodes: var seq[VecNode], st: FoldState,
+    node: VecNode) =
+  ## Route one finished node: to the top marked group, else the page.
+  if st.ocStack.len > 0 and st.ocStack[^1].group >= 0:
+    let g = st.ocStack[^1].group
+    if g notin sink.buckets:
+      sink.buckets[g] = @[]
+      sink.order.add(g)
+    sink.buckets[g].add(node)
+  else:
+    nodes.add(node)
+
+proc pushOc(st: var FoldState, group, depth: int) =
+  st.ocStack.add(OcScope(group: group, depth: depth))
+
+proc dropOcTo(st: var FoldState, depth: int) =
+  ## Close scopes a `Q` ends: anything opened deeper than the restored
+  ## depth, which covers both balanced `EMC` (already popped) and
+  ## marked content leaking across the graphics-state boundary.
+  while st.ocStack.len > 0 and st.ocStack[^1].depth > depth:
+    discard st.ocStack.pop()
 
 proc flipFor*(pageH: float64): VecXform =
   ## PDF y-up to model y-down for a page of height `pageH`.
@@ -335,7 +387,7 @@ proc shapeRunFor(d: var PdfDoc, wo: WalkedOp, fontName: string,
 
 proc emitTextRun(d: var PdfDoc, wo: WalkedOp, run: TextRun,
     st: var FoldState, pageH: float64, nodes: var seq[VecNode],
-    doc: var VecDocument) =
+    sink: var OcSink, doc: var VecDocument) =
   ## An extracted run to a text node: decoded string, origin flipped to
   ## model space, size, font, active fill, plus shaped glyphs and a
   ## baked outline when the font is embedded.
@@ -343,25 +395,27 @@ proc emitTextRun(d: var PdfDoc, wo: WalkedOp, run: TextRun,
   doc.warn("text runs carry decoded strings, origins, size, font, and " &
     "HarfBuzz-shaped glyphs plus outlines when the font is embedded; " &
     "render modes are not modeled")
-  nodes.add(wrapClips(VecNode(kind: vnkText, name: "", opacity: 1.0,
+  sink.emit(nodes, st, wrapClips(VecNode(kind: vnkText, name: "",
+    opacity: 1.0,
     xform: translateXform(run.x, pageH - run.y), text: run.text,
     fontName: run.fontName, fontSize: run.size, textFill: st.fill,
     glyphs: glyphs, outline: outline), st, 1.0))
 
 proc showRun(d: var PdfDoc, wo: WalkedOp, tgs: var GState,
     decoders: var Table[string, FontDecoder], s: string, st: var FoldState,
-    pageH: float64, nodes: var seq[VecNode], doc: var VecDocument) =
+    pageH: float64, nodes: var seq[VecNode], sink: var OcSink,
+    doc: var VecDocument) =
   ## Decode one shown string through the frame-aware decoder and emit
   ## its run, dropping it exactly when `extractText` would (outside the
   ## enclosing form's /BBox). Text-matrix advances happen inside, so
   ## later origins stay correct.
   let run = d.showTextRun(wo, tgs, decoders, s)
   if run.isSome:
-    emitTextRun(d, wo, run.get(), st, pageH, nodes, doc)
+    emitTextRun(d, wo, run.get(), st, pageH, nodes, sink, doc)
 
 proc emitPaint(st: var FoldState, strokeIt: bool,
     rule: VecFillRule, wo: WalkedOp, pageH: float64,
-    nodes: var seq[VecNode], doc: var VecDocument) =
+    nodes: var seq[VecNode], sink: var OcSink, doc: var VecDocument) =
   if st.pendingClip:
     activateClip(st, st.pendingRule, wo.ctm, pageH)
     st.pendingClip = false
@@ -375,7 +429,7 @@ proc emitPaint(st: var FoldState, strokeIt: bool,
     n.stroke = st.stroke
   elif strokeIt:
     n.hasStroke = true
-  nodes.add(wrapClips(n, st, 1.0))
+  sink.emit(nodes, st, wrapClips(n, st, 1.0))
 
 proc lookupShading(d: var PdfDoc, res: CosObj,
     name: string): CosObj =
@@ -408,17 +462,20 @@ proc patternPaint(d: var PdfDoc, res: CosObj, name: string,
     patternXform: identityXform())
 
 proc foldPage*(d: var PdfDoc, pageIdx: int, pageH: float64,
-    doc: var VecDocument): seq[VecNode] =
+    oc: var OcgTable, doc: var VecDocument): FoldedPage =
   ## One page's walked operators to artwork nodes in model space.
   ## Text state replays through a real opendocs graphics state so font
   ## selection, matrices, and advances match `extractText` exactly;
-  ## paint and clipping stay in the fold state below.
+  ## paint and clipping stay in the fold state below. Marked art routes
+  ## to `oc` groups; everything else lands in `top`.
   var st = FoldState(fill: solidPaint(rgbColor(0, 0, 0)),
     stroke: defaultStroke(),
     fillSpace: vcsRGB, strokeSpace: vcsRGB)
   var tgs = initGState()
   var decoders = initTable[string, FontDecoder]()
   var nodes: seq[VecNode] = @[]
+  var sink = OcSink(order: @[],
+    buckets: initTable[int, seq[VecNode]]())
   var warnedOps = initTable[string, bool]()
   template warnOp(opname, msg: string) =
     if opname notin warnedOps:
@@ -431,7 +488,7 @@ proc foldPage*(d: var PdfDoc, pageIdx: int, pageH: float64,
       if op.operands.len != 1 or op.operands[0].kind != coStr:
         raise newException(AiError, "Tj needs one string operand")
       showRun(d, wo, tgs, decoders, op.operands[0].sval, st,
-        pageH, nodes, doc)
+        pageH, nodes, sink, doc)
       continue
     if op.name == "TJ":
       if op.operands.len != 1 or op.operands[0].kind != coArray:
@@ -439,7 +496,7 @@ proc foldPage*(d: var PdfDoc, pageIdx: int, pageH: float64,
       for item in op.operands[0].items:
         if item.kind == coStr:
           showRun(d, wo, tgs, decoders, item.sval, st,
-            pageH, nodes, doc)
+            pageH, nodes, sink, doc)
         else:
           let th = tgs.text.scale / 100.0
           let t: array[6, float64] = [1.0, 0.0, 0.0, 1.0,
@@ -451,7 +508,7 @@ proc foldPage*(d: var PdfDoc, pageIdx: int, pageH: float64,
         raise newException(AiError, "' needs one string operand")
       tgs.applyOp(ContentOp(name: "T*"))
       showRun(d, wo, tgs, decoders, op.operands[0].sval, st,
-        pageH, nodes, doc)
+        pageH, nodes, sink, doc)
       continue
     if op.name == "\"":
       if op.operands.len != 3 or op.operands[2].kind != coStr:
@@ -461,7 +518,7 @@ proc foldPage*(d: var PdfDoc, pageIdx: int, pageH: float64,
       tgs.text.charSpace = op.operands[1].asFloat()
       tgs.applyOp(ContentOp(name: "T*"))
       showRun(d, wo, tgs, decoders, op.operands[2].sval, st,
-        pageH, nodes, doc)
+        pageH, nodes, sink, doc)
       continue
     tgs.applyOp(op)
     case op.name
@@ -471,6 +528,7 @@ proc foldPage*(d: var PdfDoc, pageIdx: int, pageH: float64,
     of "Q":
       st.depth = max(0, st.depth - 1)
       dropClipsTo(st, st.depth)
+      dropOcTo(st, st.depth)
       restorePaint(st)
     of "m":
       if st.hasOpen:
@@ -510,20 +568,20 @@ proc foldPage*(d: var PdfDoc, pageIdx: int, pageH: float64,
       clearPath(st)
     of "S", "s":
       if op.name == "s": closeOpen(st)
-      emitPaint(st, true, vfrNonZero, wo, pageH, nodes, doc)
+      emitPaint(st, true, vfrNonZero, wo, pageH, nodes, sink, doc)
     of "f", "F":
-      emitPaint(st, false, vfrNonZero, wo, pageH, nodes, doc)
+      emitPaint(st, false, vfrNonZero, wo, pageH, nodes, sink, doc)
     of "f*":
-      emitPaint(st, false, vfrEvenOdd, wo, pageH, nodes, doc)
+      emitPaint(st, false, vfrEvenOdd, wo, pageH, nodes, sink, doc)
     of "B", "B*":
       emitPaint(st, true,
         if op.name == "B*": vfrEvenOdd else: vfrNonZero,
-        wo, pageH, nodes, doc)
+        wo, pageH, nodes, sink, doc)
     of "b", "b*":
       closeOpen(st)
       emitPaint(st, true,
         if op.name == "b*": vfrEvenOdd else: vfrNonZero,
-        wo, pageH, nodes, doc)
+        wo, pageH, nodes, sink, doc)
     of "W":
       st.pendingClip = true
       st.pendingRule = vfrNonZero
@@ -647,9 +705,18 @@ proc foldPage*(d: var PdfDoc, pageIdx: int, pageH: float64,
             max(box.x1, c.x), max(box.y1, c.y))
         doc.warn("image '" & nameOp(op, 0) &
           "' keeps its name and placement, not its pixels")
-        nodes.add(wrapClips(VecNode(kind: vnkImage, name: nameOp(op, 0),
+        sink.emit(nodes, st, wrapClips(VecNode(kind: vnkImage,
+          name: nameOp(op, 0),
           opacity: 1.0, xform: identityXform(),
           imageKey: nameOp(op, 0), imageRect: box), st, 1.0))
+      elif sub.kind == coName and sub.name == "Form":
+        ## A form invocation: its expansion follows inline (the walk
+        ## emits this Do ahead of it). Its own /OC entry scopes the
+        ## whole expansion; without one the inner marked content (or
+        ## the page layer) decides. Never warns: forms are ordinary.
+        let g = groupOfFormOc(d, oc, xo)
+        if g >= 0:
+          pushOc(st, g, st.depth + 1)
       else:
         warnOp(op.name, "non-image XObject '" & nameOp(op, 0) &
           "' is not interpreted")
@@ -665,39 +732,74 @@ proc foldPage*(d: var PdfDoc, pageIdx: int, pageH: float64,
         else:
           VecPaint(kind: vpkRadial, gradient: grad)
       let box = vecRect(0, 0, 1, 1)
-      nodes.add(wrapClips(VecNode(kind: vnkPath, name: "",
+      sink.emit(nodes, st, wrapClips(VecNode(kind: vnkPath, name: "",
         opacity: 1.0, xform: identityXform(),
         path: VecPath(subs: @[rectSubPath(box)]), fill: paint,
         stroke: defaultStroke(), hasStroke: false), st, 1.0))
       doc.warn("shading '" & nameOp(op, 0) &
         "' paints its whole artboard box, not its true extent")
-    of "BMC", "BDC", "EMC", "BX", "EX", "MP", "DP", "cm":
+    of "BDC", "BMC":
+      ## Marked content opens a routing scope: /OC sequences resolve
+      ## to their group, everything else (and unresolvable /OC) routes
+      ## to the page layer. The matching EMC pops it.
+      if op.name == "BDC":
+        pushOc(st, groupOfBdc(d, oc, wo.resources, op.operands),
+          st.depth)
+      else:
+        pushOc(st, -1, st.depth)
+    of "EMC":
+      if st.ocStack.len > 0:
+        discard st.ocStack.pop()
+    of "BX", "EX", "MP", "DP", "cm":
       discard
     else:
       warnOp(op.name, "operator '" & op.name &
         "' is not mapped to vector artwork; skipped")
   for _, sf in st.fonts.mpairs:
     close(sf)
-  nodes
+  FoldedPage(top: nodes, order: sink.order, grouped: sink.buckets)
 
 proc readAiVectors*(data: string): VecDocument =
-  ## A PDF-compatible `.ai` file to vector artwork, one artboard and one
-  ## layer per page. Failures raise `AiError`, including for pages whose
-  ## content operators cannot map.
+  ## A PDF-compatible `.ai` file to vector artwork, one artboard per
+  ## page. Without optional content groups each page also becomes one
+  ## layer; otherwise marked art collects into one layer per group (in
+  ## first-encounter order, shared across pages) and the rest stays on
+  ## per-page layers. Failures raise `AiError`, including for pages
+  ## whose content operators cannot map.
   result = VecDocument()
   var d = openPdfDoc(data)
+  var oc = readOcgs(d)
+  var ocLayers = initTable[int, int]()
   let boxes = d.pageBoxes()
   for i in 0 ..< boxes.len:
     result.artboards.add(VecArtboard(name: "Artboard " & $(i + 1),
       rect: vecRect(0, 0, boxes[i].width, boxes[i].height)))
     var layer = VecLayer(name: "Page " & $(i + 1), visible: true,
-      locked: false)
+      locked: false, printable: true)
     try:
-      layer.children = foldPage(d, i, boxes[i].height, result)
+      let fp = foldPage(d, i, boxes[i].height, oc, result)
+      layer.children = fp.top
+      result.layers.add(layer)
+      for g in fp.order:
+        if g notin ocLayers:
+          let grp = oc.groups[g]
+          result.layers.add(VecLayer(name: grp.name,
+            visible: grp.visible, locked: grp.locked,
+            printable: grp.printable))
+          ocLayers[g] = result.layers.len - 1
+        result.layers[ocLayers[g]].children.add(fp.grouped[g])
     except AiError as e:
       raise newException(AiError,
         "page " & $(i + 1) & " vector extraction failed: " & e.msg)
     except PdfError as e:
       raise newException(AiError,
         "page " & $(i + 1) & " vector extraction failed: " & e.msg)
-    result.layers.add(layer)
+  if oc.dropped > 0:
+    result.warn($oc.dropped &
+      " optional content groups past the cap stay on the page layer")
+  if oc.badProps:
+    result.warn("an optional-content reference failed to resolve; " &
+      "its art stays on the page layer")
+  if oc.badPolicy:
+    result.warn("a membership policy other than AnyOn routes by its " &
+      "first group")

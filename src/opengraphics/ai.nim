@@ -7,6 +7,7 @@ import ai/pages
 import ai/xmp
 import ai/pdfcompat
 import ai/shape
+import ai/ocg
 import ai/content
 import ai/legacy
 import ai/write
@@ -19,6 +20,7 @@ export pages
 export xmp
 export pdfcompat
 export shape
+export ocg
 export content
 export legacy
 export write

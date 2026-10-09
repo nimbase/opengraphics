@@ -80,7 +80,7 @@ test "stroke attributes map fully":
 test "model to svg round-trips geometry and paint":
   var src = VecDocument()
   src.artboards.add(VecArtboard(rect: vecRect(0, 0, 100, 100)))
-  var layer = VecLayer(name: "L", visible: true, locked: false)
+  var layer = VecLayer(name: "L", visible: true, locked: false, printable: true)
   var sub = VecSubPath()
   moveTo(sub, vecPt(1, 2))
   lineTo(sub, vecPt(30, 4))
@@ -107,7 +107,7 @@ test "model to svg round-trips geometry and paint":
 test "gradient round-trips through defs":
   var src = VecDocument()
   src.artboards.add(VecArtboard(rect: vecRect(0, 0, 10, 10)))
-  var layer = VecLayer(name: "L", visible: true, locked: false)
+  var layer = VecLayer(name: "L", visible: true, locked: false, printable: true)
   let g = VecGradient(kind: vgkLinear, xform: identityXform(),
     objectBoundingBox: false, spread: vspPad,
     x0: 0, y0: 0, x1: 10, y1: 0,

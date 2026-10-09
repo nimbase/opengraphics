@@ -10,7 +10,7 @@ proc sampleDoc(): VecDocument =
   result = VecDocument()
   result.artboards.add(VecArtboard(name: "A",
     rect: vecRect(0, 0, 200, 100)))
-  var layer = VecLayer(name: "L", visible: true, locked: false)
+  var layer = VecLayer(name: "L", visible: true, locked: false, printable: true)
   var sub = VecSubPath()
   moveTo(sub, vecPt(10, 10))
   lineTo(sub, vecPt(60, 10))
@@ -67,7 +67,7 @@ test "written file rereads to the same artwork":
 test "text, images, and patterns warn instead of vanishing":
   var doc = VecDocument()
   doc.artboards.add(VecArtboard(rect: vecRect(0, 0, 50, 50)))
-  var layer = VecLayer(name: "L", visible: true, locked: false)
+  var layer = VecLayer(name: "L", visible: true, locked: false, printable: true)
   layer.children.add(VecNode(kind: vnkText, name: "", opacity: 1.0,
     xform: identityXform(), text: "hi", fontName: "F",
     fontSize: 10, textFill: solidPaint(rgbColor(0, 0, 0))))
@@ -89,7 +89,7 @@ test "text, images, and patterns warn instead of vanishing":
 test "hidden layers are skipped loudly":
   var doc = VecDocument()
   doc.artboards.add(VecArtboard(rect: vecRect(0, 0, 50, 50)))
-  doc.layers.add(VecLayer(name: "off", visible: false, locked: false))
+  doc.layers.add(VecLayer(name: "off", visible: false, locked: false, printable: true))
   let rep = writeAi(doc)
   check rep.warnings.len == 1
   check "hidden layer" in rep.warnings[0]
@@ -102,7 +102,7 @@ test "shaped text writes as outlines and rereads as paths":
   shapeInto(sf, "Hi", shaped)
   var doc = VecDocument()
   doc.artboards.add(VecArtboard(rect: vecRect(0, 0, 200, 100)))
-  var layer = VecLayer(name: "L", visible: true, locked: false)
+  var layer = VecLayer(name: "L", visible: true, locked: false, printable: true)
   layer.children.add(VecNode(kind: vnkText, name: "", opacity: 1.0,
     xform: translateXform(20, 30), text: "Hi",
     fontName: "DejaVuSans", fontSize: 10.0,

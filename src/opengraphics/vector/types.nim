@@ -164,6 +164,7 @@ type
     name*: string
     visible*: bool
     locked*: bool
+    printable*: bool ## false when the source group's print state is off
     children*: seq[VecNode]
 
   VecArtboard* = object

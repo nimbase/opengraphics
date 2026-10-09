@@ -10,7 +10,7 @@ import ../src/opengraphics/ai
 test "README .ai vector snippet runs as written":
   var vec = VecDocument()
   vec.artboards.add(VecArtboard(name: "A", rect: vecRect(0, 0, 200, 100)))
-  var layer = VecLayer(name: "L", visible: true, locked: false)
+  var layer = VecLayer(name: "L", visible: true, locked: false, printable: true)
   var sub = VecSubPath()
   moveTo(sub, vecPt(10, 10))
   lineTo(sub, vecPt(60, 40))
