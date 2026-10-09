@@ -150,6 +150,10 @@ type
       fontName*: string
       fontSize*: float64
       textFill*: VecPaint
+      baseDir*: VecPt ## unit baseline direction, model space ((0,0)
+        ## reads as +x for nodes built before directions existed)
+      advance*: float64 ## pen travel of the run in points, along baseDir
+      textHScale*: float64 ## horizontal scale in percent (Tz, 100 = off)
       glyphs*: seq[VecGlyph]
       outline*: Option[VecPath]
         ## The run drawn as paths in run-local space (origin at the run

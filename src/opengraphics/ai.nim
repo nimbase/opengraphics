@@ -8,6 +8,7 @@ import ai/xmp
 import ai/pdfcompat
 import ai/shape
 import ai/ocg
+import ai/textline
 import ai/content
 import ai/legacy
 import ai/write
@@ -21,6 +22,7 @@ export xmp
 export pdfcompat
 export shape
 export ocg
+export textline
 export content
 export legacy
 export write

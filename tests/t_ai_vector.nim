@@ -146,7 +146,7 @@ test "embedded runs shape with real advances and outlines":
 
 test "unembedded runs keep advances but gain no outlines":
   let doc = aiVectors()
-  let xi = doc.layers[0].children[10]
+  let xi = doc.layers[0].children[9]
   check xi.glyphs.len == 0
   check xi.outline.isNone
   var sawFontWarn = false
@@ -163,47 +163,62 @@ test "TD breaks the line from the line matrix":
   # Td restarts from Tlm: (10,80) moved by (0,-14) -> (10,66) -> (10,34)
   check close(o.x, 10.0) and close(o.y, 34.0)
 
-test "TJ kernings split runs and shift the matrix":
+test "TJ kernings gather into one line and shift the pen":
+  # "He" and "llo" are two show operations 0.6pt apart (the -50
+  # kerning), so they gather into a single "Hello" at He's origin.
   let doc = aiVectors()
-  let he = doc.layers[0].children[8]
-  let llo = doc.layers[0].children[9]
-  check he.text == "He"
-  check llo.text == "llo"
-  let o = applyXform(llo.xform, vecPt(0, 0))
-  # "He" advances two 500-unit missing widths at 12pt (12.0), then the
-  # -50 kerning shifts +0.6: 10 + 12 + 0.6 = 22.6
-  check close(o.x, 22.6) and close(o.y, 50.0)
+  let hello = doc.layers[0].children[8]
+  check hello.kind == vnkText
+  check hello.text == "Hello"
+  let o = applyXform(hello.xform, vecPt(0, 0))
+  check close(o.x, 10.0) and close(o.y, 50.0)
+  # the pen travels He's advances, the +0.6 kerning shift, and llo's:
+  # well past either half alone
+  check hello.advance > 24.0
+  check hello.glyphs.len == 5
+  check hello.outline.isSome
+  let b = pathBounds(hello.outline.get())
+  check b.x1 - b.x0 > 20.0
 
 test "a form shadows /F1 with its own decoder":
   let doc = aiVectors()
-  let xi = doc.layers[0].children[10]
+  let xi = doc.layers[0].children[9]
   check xi.kind == vnkText
   # the form's /F1 maps H(72) to /A through /Differences
   check xi.text == "Ai"
   let o = applyXform(xi.xform, vecPt(0, 0))
   check close(o.x, 100.0) and close(o.y, 70.0)
 
-test "text matches extractText run for run":
+test "text matches extractText line for line":
+  # Gathering merges TJ halves ("He"+"llo") but keeps every other
+  # run: each line starts where its first run did.
   var d = openPdfDoc(aiBytes())
   let runs = d.extractText(0)
+  var runTexts: seq[string] = @[]
+  for r in runs:
+    runTexts.add(r.text)
+  check runTexts == @["Hi", "Lo", "He", "llo", "Ai"]
   let doc = aiVectors()
   var nodes: seq[VecNode] = @[]
   for layer in doc.layers:
     for n in layer.children:
       if n.kind == vnkText:
         nodes.add(n)
-  check nodes.len == runs.len
-  for i in 0 ..< runs.len:
-    check nodes[i].text == runs[i].text
+  var nodeTexts: seq[string] = @[]
+  for n in nodes:
+    nodeTexts.add(n.text)
+  check nodeTexts == @["Hi", "Lo", "Hello", "Ai"]
+  let first = [0, 1, 2, 4]
+  for i in 0 ..< nodes.len:
     let o = applyXform(nodes[i].xform, vecPt(0, 0))
-    check close(o.x, runs[i].x)
-    check close(o.y, 100.0 - runs[i].y)
-    check close(nodes[i].fontSize, runs[i].size)
-    check nodes[i].fontName == runs[i].fontName
+    check close(o.x, runs[first[i]].x)
+    check close(o.y, 100.0 - runs[first[i]].y)
+    check close(nodes[i].fontSize, runs[first[i]].size)
+    check nodes[i].fontName == runs[first[i]].fontName
 
 test "images keep name and placement":
   let doc = aiVectors()
-  let im = doc.layers[0].children[11]
+  let im = doc.layers[0].children[10]
   check im.kind == vnkImage
   check im.imageKey == "Im1"
   check close(im.imageRect.x0, 10.0) and close(im.imageRect.x1, 60.0)
@@ -211,7 +226,7 @@ test "images keep name and placement":
 
 test "axial shading maps to a linear gradient":
   let doc = aiVectors()
-  let n = doc.layers[0].children[12]
+  let n = doc.layers[0].children[11]
   check n.kind == vnkPath
   check n.fill.kind == vpkLinear
   check n.fill.gradient.stops.len == 9
@@ -221,10 +236,10 @@ test "axial shading maps to a linear gradient":
 
 test "paint restores across q/Q instead of leaking":
   let doc = aiVectors()
-  let inside = doc.layers[0].children[13]
+  let inside = doc.layers[0].children[12]
   check inside.fill.kind == vpkSolid
   check close(inside.fill.solid.r, 1.0)
-  let after = doc.layers[0].children[14]
+  let after = doc.layers[0].children[13]
   check after.fill.kind == vpkSolid
   check close(after.fill.solid.g, 1.0)
 

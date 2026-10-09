@@ -131,10 +131,12 @@ import opengraphics/ai
 # PDF-compatible .ai content streams become editable vector artwork:
 # one artboard per page, paths with fills and strokes, clipping groups,
 # axial/radial shadings as gradients, placed-image references, and
-# decoded text runs (string, origin, size, font). Illustrator layers
+# decoded text gathered into point-type lines (spaces inferred from
+# gaps, runs split on font/size/paint changes). Illustrator layers
 # arrive as one layer per optional content group (name, visibility,
 # lock, print state, shared across pages); unmarked art stays on a
-# per-page layer.
+# per-page layer. ICCBased paints resolve through their alternate
+# space.
 # Runs from embedded fonts also carry HarfBuzz-shaped glyphs and baked
 # outlines, which is what the writer emits (text without outlines is
 # skipped loudly, images are skipped loudly).

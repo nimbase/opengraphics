@@ -37,6 +37,7 @@ import ../vector
 import ./pdfcompat
 import ./ocg
 import ./shape
+import ./textline
 import ./types
 
 export vector
@@ -218,12 +219,62 @@ proc paintColorSpace(cs: CosObj): tuple[space: VecColorSpace, ok: bool] =
   of "DeviceCMYK", "CMYK": (vcsCMYK, true)
   else: (vcsRGB, false)
 
+proc iccAlternate(d: var PdfDoc, res: CosObj,
+    name: string): tuple[space: VecColorSpace, ok: bool] =
+  ## `/ColorSpace /name` resolving to `[/ICCBased dict]` maps to the
+  ## dict's alternate device space (`/Alternate`, else `/N`). The ICC
+  ## profile itself is not applied; values pass through as alternate
+  ## values, which is what Illustrator's working-space ICC profiles
+  ## mean in practice.
+  let cat = d.resolve(res.dictGet("ColorSpace"))
+  if cat.kind != coDict:
+    return (vcsRGB, false)
+  let fam = d.resolve(cat.dictGet(name))
+  if fam.kind != coArray or fam.items.len < 2 or
+      fam.items[0].kind != coName or fam.items[0].name != "ICCBased":
+    return (vcsRGB, false)
+  let icc = d.resolve(fam.items[1])
+  if icc.kind != coDict and icc.kind != coStream:
+    return (vcsRGB, false)
+  let alt = d.resolve(icc.dictGet("Alternate"))
+  if alt.kind == coName:
+    return paintColorSpace(alt)
+  if alt.kind == coArray and alt.items.len > 0:
+    return paintColorSpace(alt.items[0])
+  let n = icc.dictGet("N")
+  if n.kind == coInt:
+    case n.ival
+    of 1: return (vcsGray, true)
+    of 3: return (vcsRGB, true)
+    of 4: return (vcsCMYK, true)
+    else: discard
+  (vcsRGB, false)
+
 proc colorOperands(op: ContentOp, n: int,
     space: VecColorSpace): VecColor =
   case space
   of vcsGray: grayColor(num(op, 0))
   of vcsRGB: rgbColor(num(op, 0), num(op, 1), num(op, 2))
   of vcsCMYK: cmykColor(num(op, 0), num(op, 1), num(op, 2), num(op, 3))
+
+proc setSpacePaint(st: var FoldState, space: VecColorSpace,
+    op: ContentOp, stroke: bool): bool =
+  ## `sc`/`SC` and numeric `scn`/`SCN` share this: paint from the
+  ## operands when their count fits the space. False keeps paint state
+  ## unchanged for the caller's warning.
+  let want = case space
+    of vcsGray: 1
+    of vcsRGB: 3
+    of vcsCMYK: 4
+  if op.operands.len != want:
+    return false
+  let c = colorOperands(op, 0, space)
+  if stroke:
+    st.stroke.paint = solidPaint(c)
+    st.hasStroke = true
+  else:
+    st.fill = solidPaint(c)
+  true
 
 proc shadingColor(cs: CosObj, vals: seq[float64]): VecColor =
   ## A shading sample value to a color. Only device spaces map;
@@ -385,12 +436,40 @@ proc shapeRunFor(d: var PdfDoc, wo: WalkedOp, fontName: string,
   (toVecGlyphs(shaped, run.size),
     bakeOutline(st.fonts[key], shaped.glyphs, run.size))
 
+proc runDirAdvance(wo: WalkedOp, tm0, tm1: array[6, float64],
+    size: float64): tuple[dir: VecPt, advance: float64] =
+  ## A shown run's baseline direction and pen travel in model space.
+  ## `tm0`/`tm1` are the text matrix before/after the show, mapping
+  ## text space to user space; the op CTM plus the page flip take both
+  ## to model space. Degenerate matrices read as +x with no travel.
+  var ux = tm0[0]
+  var uy = tm0[1]
+  let axis = sqrt(ux * ux + uy * uy)
+  if axis < 1e-12 or size <= 0.0:
+    return (vecPt(1.0, 0.0), 0.0)
+  ux /= axis
+  uy /= axis
+  let dx = wo.ctm[0] * ux + wo.ctm[2] * uy
+  var dy = wo.ctm[1] * ux + wo.ctm[3] * uy
+  dy = -dy # device y-up to model y-down
+  let dl = sqrt(dx * dx + dy * dy)
+  if dl < 1e-12:
+    return (vecPt(1.0, 0.0), 0.0)
+  let dir = vecPt(dx / dl, dy / dl)
+  let ex = tm1[4] - tm0[4]
+  let ey = tm1[5] - tm0[5]
+  let mx = wo.ctm[0] * ex + wo.ctm[2] * ey
+  let my = -(wo.ctm[1] * ex + wo.ctm[3] * ey)
+  (dir, mx * dir.x + my * dir.y)
+
 proc emitTextRun(d: var PdfDoc, wo: WalkedOp, run: TextRun,
     st: var FoldState, pageH: float64, nodes: var seq[VecNode],
-    sink: var OcSink, doc: var VecDocument) =
+    sink: var OcSink, geo: tuple[dir: VecPt, advance, hscale: float64],
+    doc: var VecDocument) =
   ## An extracted run to a text node: decoded string, origin flipped to
   ## model space, size, font, active fill, plus shaped glyphs and a
-  ## baked outline when the font is embedded.
+  ## baked outline when the font is embedded. `geo` carries the run's
+  ## baseline geometry for line gathering.
   let (glyphs, outline) = shapeRunFor(d, wo, run.fontName, run, st, doc)
   doc.warn("text runs carry decoded strings, origins, size, font, and " &
     "HarfBuzz-shaped glyphs plus outlines when the font is embedded; " &
@@ -399,6 +478,7 @@ proc emitTextRun(d: var PdfDoc, wo: WalkedOp, run: TextRun,
     opacity: 1.0,
     xform: translateXform(run.x, pageH - run.y), text: run.text,
     fontName: run.fontName, fontSize: run.size, textFill: st.fill,
+    baseDir: geo.dir, advance: geo.advance, textHScale: geo.hscale,
     glyphs: glyphs, outline: outline), st, 1.0))
 
 proc showRun(d: var PdfDoc, wo: WalkedOp, tgs: var GState,
@@ -408,10 +488,17 @@ proc showRun(d: var PdfDoc, wo: WalkedOp, tgs: var GState,
   ## Decode one shown string through the frame-aware decoder and emit
   ## its run, dropping it exactly when `extractText` would (outside the
   ## enclosing form's /BBox). Text-matrix advances happen inside, so
-  ## later origins stay correct.
+  ## later origins stay correct. The text matrix is sampled around the
+  ## decode for the run's baseline geometry (direction, pen travel,
+  ## horizontal scale).
+  let tm0 = tgs.textMatrix
+  let hscale = tgs.text.scale
   let run = d.showTextRun(wo, tgs, decoders, s)
   if run.isSome:
-    emitTextRun(d, wo, run.get(), st, pageH, nodes, sink, doc)
+    let (dir, adv) = runDirAdvance(wo, tm0, tgs.textMatrix,
+      run.get().size)
+    emitTextRun(d, wo, run.get(), st, pageH, nodes, sink,
+      (dir: dir, advance: adv, hscale: hscale), doc)
 
 proc emitPaint(st: var FoldState, strokeIt: bool,
     rule: VecFillRule, wo: WalkedOp, pageH: float64,
@@ -613,30 +700,42 @@ proc foldPage*(d: var PdfDoc, pageIdx: int, pageH: float64,
       if op.name == "cs": st.fillCSName = op.operands[0].name
       else: st.strokeCSName = op.operands[0].name
       let (space, ok) = paintColorSpace(op.operands[0])
-      if not ok:
-        warnOp(op.name, "color space '" &
-          (if op.operands[0].kind == coName: op.operands[0].name else: "?") &
-          "' is not mapped; paint state unchanged")
-      elif op.name == "cs": st.fillSpace = space
-      else: st.strokeSpace = space
+      if ok:
+        if op.name == "cs": st.fillSpace = space
+        else: st.strokeSpace = space
+      else:
+        var alt = (space: vcsRGB, ok: false)
+        try:
+          alt = iccAlternate(d, wo.resources, op.operands[0].name)
+        except PdfError:
+          discard
+        if alt.ok:
+          warnOp(op.name, "ICCBased color spaces use their alternate " &
+            "space; the ICC profile itself is not applied")
+          if op.name == "cs": st.fillSpace = alt.space
+          else: st.strokeSpace = alt.space
+        else:
+          warnOp(op.name, "color space '" & op.operands[0].name &
+            "' is not mapped; paint state unchanged")
     of "sc", "SC":
       let space = if op.name == "sc": st.fillSpace else: st.strokeSpace
-      let want = case space
-        of vcsGray: 1
-        of vcsRGB: 3
-        of vcsCMYK: 4
-      if op.operands.len == want:
-        let c = colorOperands(op, 0, space)
-        if op.name == "sc": st.fill = solidPaint(c)
-        else:
-          st.stroke.paint = solidPaint(c)
-          st.hasStroke = true
-      else:
+      if not setSpacePaint(st, space, op, op.name == "SC"):
         warnOp(op.name, "sc/SC operand count does not match the " &
           "current color space; paint state unchanged")
     of "scn", "SCN":
       let csName = if op.name == "scn": st.fillCSName else: st.strokeCSName
-      if op.operands.len >= 1 and op.operands[^1].kind == coName and
+      let stroke = op.name == "SCN"
+      var numeric = op.operands.len > 0
+      for o in op.operands:
+        if o.kind != coInt and o.kind != coFloat:
+          numeric = false
+      if numeric:
+        ## SCN on a non-pattern space is SC with another name.
+        let space = if stroke: st.strokeSpace else: st.fillSpace
+        if not setSpacePaint(st, space, op, stroke):
+          warnOp(op.name, "scn/SCN operand count does not match the " &
+            "current color space; paint state unchanged")
+      elif op.operands.len >= 1 and op.operands[^1].kind == coName and
           csName == "Pattern":
         let paint = patternPaint(d, wo.resources, op.operands[^1].name,
           doc)
@@ -752,6 +851,12 @@ proc foldPage*(d: var PdfDoc, pageIdx: int, pageH: float64,
         discard st.ocStack.pop()
     of "BX", "EX", "MP", "DP", "cm":
       discard
+    of "BT", "ET", "Tf", "Tc", "Tw", "Tm", "Td", "TD", "T*", "Tz",
+        "TL", "Tr", "Ts":
+      ## Text state: tracked by the graphics-state replay above, no
+      ## artwork of its own. Showing operators (Tj, TJ, ', ") are
+      ## intercepted before the replay; these never reach the fold.
+      discard
     else:
       warnOp(op.name, "operator '" & op.name &
         "' is not mapped to vector artwork; skipped")
@@ -759,17 +864,30 @@ proc foldPage*(d: var PdfDoc, pageIdx: int, pageH: float64,
     close(sf)
   FoldedPage(top: nodes, order: sink.order, grouped: sink.buckets)
 
+proc gatherBucket(nodes: seq[VecNode],
+    seen: var Table[string, bool], doc: var VecDocument): seq[VecNode] =
+  ## One routing bucket's text gathered into lines, warning each note
+  ## once across the whole document.
+  let g = gatherTextLines(nodes)
+  for nt in g.notes:
+    if nt notin seen:
+      seen[nt] = true
+      doc.warn(nt)
+  g.nodes
+
 proc readAiVectors*(data: string): VecDocument =
   ## A PDF-compatible `.ai` file to vector artwork, one artboard per
   ## page. Without optional content groups each page also becomes one
   ## layer; otherwise marked art collects into one layer per group (in
   ## first-encounter order, shared across pages) and the rest stays on
-  ## per-page layers. Failures raise `AiError`, including for pages
-  ## whose content operators cannot map.
+  ## per-page layers. Consecutive text runs on one baseline gather
+  ## into point-type lines per layer. Failures raise `AiError`,
+  ## including for pages whose content operators cannot map.
   result = VecDocument()
   var d = openPdfDoc(data)
   var oc = readOcgs(d)
   var ocLayers = initTable[int, int]()
+  var seenNotes = initTable[string, bool]()
   let boxes = d.pageBoxes()
   for i in 0 ..< boxes.len:
     result.artboards.add(VecArtboard(name: "Artboard " & $(i + 1),
@@ -777,7 +895,8 @@ proc readAiVectors*(data: string): VecDocument =
     var layer = VecLayer(name: "Page " & $(i + 1), visible: true,
       locked: false, printable: true)
     try:
-      let fp = foldPage(d, i, boxes[i].height, oc, result)
+      var fp = foldPage(d, i, boxes[i].height, oc, result)
+      fp.top = gatherBucket(fp.top, seenNotes, result)
       layer.children = fp.top
       result.layers.add(layer)
       for g in fp.order:
@@ -787,7 +906,8 @@ proc readAiVectors*(data: string): VecDocument =
             visible: grp.visible, locked: grp.locked,
             printable: grp.printable))
           ocLayers[g] = result.layers.len - 1
-        result.layers[ocLayers[g]].children.add(fp.grouped[g])
+        result.layers[ocLayers[g]].children.add(
+          gatherBucket(fp.grouped[g], seenNotes, result))
     except AiError as e:
       raise newException(AiError,
         "page " & $(i + 1) & " vector extraction failed: " & e.msg)
