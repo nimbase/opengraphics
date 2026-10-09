@@ -18,4 +18,4 @@ tests/data/.DS_Store
 
 # Local planning docs live here and stay out of the repo.
 /plans/
-
+clue.lock
