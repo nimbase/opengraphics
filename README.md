@@ -39,8 +39,8 @@
 - Unknown blocks preserved as raw bytes so future writers can round-trip files
 
 ## Prerequisites
-- System libraries with pkg-config files: `harfbuzz` (text shaping)
-  and `libvips` (image decode and color)
+- System libraries with pkg-config files: `libvips` (image decode
+  and color). Text shaping is pure Nim via `harfnim`, no C library.
 
 ## Examples
 Runnable versions live in `examples/` (run from the package root).
@@ -137,7 +137,7 @@ import opengraphics/ai
 # lock, print state, shared across pages); unmarked art stays on a
 # per-page layer. ICCBased paints resolve through their alternate
 # space.
-# Runs from embedded fonts also carry HarfBuzz-shaped glyphs and baked
+# Runs from embedded fonts also carry harfnim-shaped glyphs and baked
 # outlines, which is what the writer emits (text without outlines is
 # skipped loudly, images are skipped loudly).
 # Everything approximated is listed in `vec.warnings`, never dropped

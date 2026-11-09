@@ -472,7 +472,7 @@ proc emitTextRun(d: var PdfDoc, wo: WalkedOp, run: TextRun,
   ## baseline geometry for line gathering.
   let (glyphs, outline) = shapeRunFor(d, wo, run.fontName, run, st, doc)
   doc.warn("text runs carry decoded strings, origins, size, font, and " &
-    "HarfBuzz-shaped glyphs plus outlines when the font is embedded; " &
+    "harfnim-shaped glyphs plus outlines when the font is embedded; " &
     "render modes are not modeled")
   sink.emit(nodes, st, wrapClips(VecNode(kind: vnkText, name: "",
     opacity: 1.0,

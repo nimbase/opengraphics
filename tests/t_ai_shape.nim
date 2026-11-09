@@ -1,7 +1,8 @@
 ## Shaping module tests: advances, ligatures, kerning, outlines.
 ##
 ## Expected values come from `hb-shape` 14.2.1 on the vendored micro
-## font, so they pin HarfBuzz behavior, not just ours:
+## font, so they pin shaping behavior, not just ours (harfnim matches
+## them exactly):
 ##   Hi  -> [gid41=0+1540|gid74=1+569]
 ##   fi  -> [gid128=0+1290]
 ##   AV  -> [gid34=0+1270|gid55=1+1401]

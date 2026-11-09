@@ -263,7 +263,7 @@ test "unknown operators and gs warn once each":
   for w in doc.warnings:
     if "operator 'ZZ'" in w: sawUnknown = true
     if "ExtGState" in w: sawGs = true
-    if "HarfBuzz-shaped" in w: sawText = true
+    if "harfnim-shaped" in w: sawText = true
     if "not its pixels" in w: sawImage = true
     if "artboard box" in w: sawShade = true
   check sawUnknown and sawGs and sawText and sawImage and sawShade

@@ -1,4 +1,4 @@
-## Glyph shaping and outlines through HarfBuzz.
+## Glyph shaping and outlines through harfnim.
 ##
 ## Shapes decoded run strings (kerning, ligatures, GPOS adjustments
 ## included) and extracts glyph outlines as vector paths. Font scale
@@ -6,27 +6,20 @@
 ## coordinates all read out in font units, y-up for outlines; callers
 ## scale by fontSize/upem and flip y for the y-down vector model.
 ##
-## Only granular harfbuzz submodules are imported, with compile flags
-## from `pkg-config harfbuzz` alone: the full `harfbuzz` hub would also
-## drag `harfbuzz-subset` and `harfbuzz-icu` queries into every compile,
-## which the Linux CI images do not carry. The callback warning
-## suppression below is the same one the hub applies (see hb_common):
-## Nim callback procs are ABI-identical but nominally distinct, which
-## clang 16+ escalates without it.
-
-{.passC: gorge("pkg-config --cflags harfbuzz").}
-{.passL: gorge("pkg-config --libs harfbuzz").}
-{.passC: "-Wno-incompatible-function-pointer-types".}
+## Pure Nim: no C library, no pkg-config. The default feature set
+## mirrors `hb-shape` (abvm blwm calt ccmp clig curs dist kern liga
+## locl mark mkmk rlig rclt); harfnim's `shape` applies only requested
+## features, so shaping with an empty list would skip kerning and
+## ligatures entirely.
 
 import std/options
-import harfbuzz/hb_common
-import harfbuzz/hb_blob
-import harfbuzz/hb_face
-import harfbuzz/hb_font
-import harfbuzz/hb_buffer
-import harfbuzz/hb_shape
-import harfbuzz/hb_draw
-import harfbuzz/hb_ot_font
+import harfnim/sfnt
+import harfnim/font
+import harfnim/buffer
+import harfnim/shape
+import harfnim/feature
+import harfnim/tag
+import harfnim/draw
 import opendocs/pdf/cos
 import opendocs/pdf/docmodel
 import opendocs/pdf/filters
@@ -35,17 +28,21 @@ from ../vector/path import curveTo, lineTo, moveTo
 
 export types
 
+const DefaultShapeFeatures = ["abvm", "blwm", "calt", "ccmp", "clig",
+  "curs", "dist", "kern", "liga", "locl", "mark", "mkmk", "rlig", "rclt"]
+  ## Enabled unless mentioned, like `hb-shape` (see hr-shape).
+
 type
   ShapeError* = object of CatchableError
 
   ShapedFont* = object
-    ## One open face: blob, face, and font at upem scale. `bytes` keeps
-    ## the program alive because the blob does not copy. Call `close`
-    ## when done; closing is idempotent and safe on a zero value.
+    ## One open face: parsed font plus shaper at upem scale.
+    ## `bytes` keeps the program for callers; the parsed font owns its
+    ## own copy. Call `close` when done; closing is idempotent and safe
+    ## on a zero value.
     bytes*: string
-    blob*: ptr hb_blob_t
-    face*: ptr hb_face_t
-    font*: ptr hb_font_t
+    parsed*: SfntFont
+    shaper*: ShaperFont
     upem*: int
 
   ShapedGlyph* = object
@@ -67,64 +64,53 @@ proc shapeFail(msg: string) {.noreturn.} =
   raise newException(ShapeError, msg)
 
 proc close*(sf: var ShapedFont) =
-  if sf.font != nil:
-    hb_font_destroy(sf.font)
-    sf.font = nil
-  if sf.face != nil:
-    hb_face_destroy(sf.face)
-    sf.face = nil
-  if sf.blob != nil:
-    hb_blob_destroy(sf.blob)
-    sf.blob = nil
+  sf.shaper = nil
 
 proc openShapedFont*(fontBytes: string): ShapedFont =
   ## Open a TrueType/OpenType program for shaping and drawing.
-  ## HarfBuzz cannot parse Adobe Type 1 (CFF in a bare FontFile
-  ## stream is fine; Type 1 is not), so those fail here, loudly.
+  ## Adobe Type 1 programs fail here, loudly (harfnim parses
+  ## TrueType/OpenType collections only).
   if fontBytes.len == 0:
     shapeFail("cannot shape text with an empty font program")
-  result.bytes = fontBytes
-  result.blob = hb_blob_create(cstring(result.bytes),
-    cuint(result.bytes.len), HB_MEMORY_MODE_READONLY, nil, nil)
-  if result.blob == nil:
-    shapeFail("HarfBuzz refused the font program")
-  result.face = hb_face_create(result.blob, 0)
-  result.font = hb_font_create(result.face)
-  hb_ot_font_set_funcs(result.font)
-  result.upem = int(hb_face_get_upem(result.face))
-  if result.upem <= 0:
-    close(result)
+  var parsed: SfntFont
+  try:
+    parsed = parseFontString(fontBytes)
+  except CatchableError as e:
+    shapeFail("harfnim refused the font program (" & e.msg & ")")
+  let upem = int(parsed.unitsPerEm)
+  if upem <= 0:
     shapeFail("font program reports no units-per-em")
-  if hb_face_get_glyph_count(result.face) == 0:
-    close(result)
+  if parsed.numGlyphs == 0:
     shapeFail("font program has no glyphs (Adobe Type 1 programs " &
-      "are not supported by HarfBuzz)")
-  hb_font_set_scale(result.font, cint(result.upem), cint(result.upem))
+      "are not supported by harfnim)")
+  var shaper = newShaperFont(parsed)
+  shaper.setScale(int32(upem))
+  ShapedFont(bytes: fontBytes, parsed: parsed, shaper: shaper,
+    upem: upem)
+
+proc shapeFeatures(): seq[Feature] =
+  result = newSeq[Feature](DefaultShapeFeatures.len)
+  for i, t in DefaultShapeFeatures:
+    result[i] = globalFeature(tagFromStr(t), 1)
 
 proc shapeInto*(sf: ShapedFont, text: string, shaped: var ShapedText) =
   ## Shape UTF-8 `text`, appending glyphs with positions and clusters.
   ## Direction, script, and language are guessed per buffer.
   shaped.upem = sf.upem
-  let buf = hb_buffer_create()
-  hb_buffer_add_utf8(buf, cstring(text), cint(text.len), 0, cint(text.len))
-  hb_buffer_guess_segment_properties(buf)
-  hb_shape(sf.font, buf, nil, 0)
-  var nInfo: cuint = 0
-  var nPos: cuint = 0
-  let infos = cast[ptr UncheckedArray[hb_glyph_info_t]](
-    hb_buffer_get_glyph_infos(buf, addr nInfo))
-  let poss = cast[ptr UncheckedArray[hb_glyph_position_t]](
-    hb_buffer_get_glyph_positions(buf, addr nPos))
-  let n = min(int(nInfo), int(nPos))
+  if text.len == 0 or sf.shaper == nil:
+    return
+  var buf = newBuffer()
+  buf.pushStr(text)
+  shape(sf.shaper, buf, shapeFeatures())
+  let n = min(buf.len, min(buf.info.len, buf.pos.len))
   for i in 0 ..< n:
     shaped.glyphs.add(ShapedGlyph(
-      glyphId: int(infos[i].codepoint),
-      cluster: int(infos[i].cluster),
-      xAdvance: float64(poss[i].x_advance),
-      yAdvance: float64(poss[i].y_advance),
-      xOffset: float64(poss[i].x_offset),
-      yOffset: float64(poss[i].y_offset)))
-  hb_buffer_destroy(buf)
+      glyphId: int(buf.info[i].glyphId),
+      cluster: int(buf.info[i].cluster),
+      xAdvance: float64(buf.pos[i].xAdvance),
+      yAdvance: float64(buf.pos[i].yAdvance),
+      xOffset: float64(buf.pos[i].xOffset),
+      yOffset: float64(buf.pos[i].yOffset)))
 
 proc shapeText*(fontBytes, text: string): ShapedText =
   ## Shape `text` with one throwaway font open. For repeated runs
@@ -147,81 +133,75 @@ proc flushSub(c: var OutlineCollector) =
   c.sub = VecSubPath()
   c.hasSub = false
 
-proc collectorOf(data: pointer): ptr OutlineCollector =
-  cast[ptr OutlineCollector](data)
+proc emitMove(c: var OutlineCollector, x, y: float64) =
+  flushSub(c)
+  c.sub = VecSubPath()
+  moveTo(c.sub, vecPt(x, y))
+  c.hasSub = true
 
-proc drawMove(dfuncs: ptr hb_draw_funcs_t, data: pointer,
-    st: ptr hb_draw_state_t, x, y: cfloat,
-    ud: pointer) {.cdecl.} =
-  let c = collectorOf(data)
-  flushSub(c[])
-  c[].sub = VecSubPath()
-  moveTo(c[].sub, vecPt(float64(x), float64(y)))
-  c[].hasSub = true
-
-proc drawLine(dfuncs: ptr hb_draw_funcs_t, data: pointer,
-    st: ptr hb_draw_state_t, x, y: cfloat,
-    ud: pointer) {.cdecl.} =
-  let c = collectorOf(data)
-  if not c[].hasSub:
-    c[].sub = VecSubPath()
-    moveTo(c[].sub, vecPt(float64(x), float64(y)))
-    c[].hasSub = true
+proc emitLine(c: var OutlineCollector, x, y: float64) =
+  if not c.hasSub:
+    c.sub = VecSubPath()
+    moveTo(c.sub, vecPt(x, y))
+    c.hasSub = true
   else:
-    lineTo(c[].sub, vecPt(float64(x), float64(y)))
+    lineTo(c.sub, vecPt(x, y))
 
-proc drawQuadratic(dfuncs: ptr hb_draw_funcs_t, data: pointer,
-    st: ptr hb_draw_state_t, cx, cy, x, y: cfloat,
-    ud: pointer) {.cdecl.} =
+proc emitQuadratic(c: var OutlineCollector, cx, cy, x, y: float64) =
   ## TrueType quadratics elevate to cubics: C1 = P0 + 2/3(Q-P0),
   ## C2 = P3 + 2/3(Q-P3). Exact, not an approximation.
-  let c = collectorOf(data)
-  if not c[].hasSub or c[].sub.anchors.len == 0:
-    drawLine(dfuncs, data, st, x, y, ud)
+  if not c.hasSub or c.sub.anchors.len == 0:
+    emitLine(c, x, y)
     return
-  let p0 = c[].sub.anchors[^1].p
-  let q = vecPt(float64(cx), float64(cy))
-  let p3 = vecPt(float64(x), float64(y))
-  curveTo(c[].sub,
+  let p0 = c.sub.anchors[^1].p
+  let q = vecPt(cx, cy)
+  let p3 = vecPt(x, y)
+  curveTo(c.sub,
     vecPt(p0.x + 2.0/3.0*(q.x - p0.x), p0.y + 2.0/3.0*(q.y - p0.y)),
     vecPt(p3.x + 2.0/3.0*(q.x - p3.x), p3.y + 2.0/3.0*(q.y - p3.y)),
     p3)
 
-proc drawCubic(dfuncs: ptr hb_draw_funcs_t, data: pointer,
-    st: ptr hb_draw_state_t, c1x, c1y, c2x, c2y, x, y: cfloat,
-    ud: pointer) {.cdecl.} =
-  let c = collectorOf(data)
-  if not c[].hasSub or c[].sub.anchors.len == 0:
-    drawLine(dfuncs, data, st, x, y, ud)
+proc emitCubic(c: var OutlineCollector, c1x, c1y, c2x, c2y, x,
+    y: float64) =
+  if not c.hasSub or c.sub.anchors.len == 0:
+    emitLine(c, x, y)
     return
-  curveTo(c[].sub, vecPt(float64(c1x), float64(c1y)),
-    vecPt(float64(c2x), float64(c2y)), vecPt(float64(x), float64(y)))
+  curveTo(c.sub, vecPt(c1x, c1y), vecPt(c2x, c2y), vecPt(x, y))
 
-proc drawClose(dfuncs: ptr hb_draw_funcs_t, data: pointer,
-    st: ptr hb_draw_state_t, ud: pointer) {.cdecl.} =
-  let c = collectorOf(data)
-  if c[].hasSub:
-    c[].sub.closed = true
-    flushSub(c[])
+proc emitClose(c: var OutlineCollector) =
+  if c.hasSub:
+    c.sub.closed = true
+    flushSub(c)
 
 proc glyphOutlineInto*(sf: ShapedFont, glyphId: int,
     path: var VecPath) =
   ## The outline of one glyph appended to `path`, in font units, y-up.
   ## Empty glyphs (spaces) append nothing; that is expected, not an error.
-  var funcs = hb_draw_funcs_create()
-  hb_draw_funcs_set_move_to_func(funcs, drawMove, nil, nil)
-  hb_draw_funcs_set_line_to_func(funcs, drawLine, nil, nil)
-  hb_draw_funcs_set_quadratic_to_func(funcs, drawQuadratic, nil, nil)
-  hb_draw_funcs_set_cubic_to_func(funcs, drawCubic, nil, nil)
-  hb_draw_funcs_set_close_path_func(funcs, drawClose, nil, nil)
+  if sf.shaper == nil:
+    return
   var c = OutlineCollector()
-  hb_font_draw_glyph(sf.font, hb_codepoint_t(glyphId), funcs,
-    cast[pointer](addr c))
+  let ok = sf.shaper.drawGlyph(newGlyphId(uint32(glyphId)),
+    proc(op: DrawOp) {.closure.} =
+      case op.kind
+      of moveTo:
+        emitMove(c, float64(op.to.x), float64(op.to.y))
+      of lineTo:
+        emitLine(c, float64(op.to.x), float64(op.to.y))
+      of quadraticTo:
+        emitQuadratic(c, float64(op.qCtrl.x), float64(op.qCtrl.y),
+          float64(op.qTo.x), float64(op.qTo.y))
+      of cubicTo:
+        emitCubic(c, float64(op.c1.x), float64(op.c1.y),
+          float64(op.c2.x), float64(op.c2.y), float64(op.cTo.x),
+          float64(op.cTo.y))
+      of closePath:
+        emitClose(c))
+  if not ok:
+    return
   flushSub(c)
   for s in c.path.subs:
     if s.anchors.len > 0:
       path.subs.add(s)
-  hb_draw_funcs_destroy(funcs)
 
 proc glyphOutline*(fontBytes: string, glyphId: int): VecPath =
   ## One glyph's outline with a throwaway font open.
@@ -234,11 +214,6 @@ proc embeddedFontBytes*(fontDict: CosObj, d: var PdfDoc): string =
   ## The embedded program from a font dictionary's /FontDescriptor
   ## (/FontFile2 or /FontFile3 preferred, /FontFile last). Raises
   ## ShapeError when the font is not embedded.
-  ##
-  ## This mirrors opendocs `loadFontBytes` on purpose: importing that
-  ## module would pull the full harfbuzz hub (including subset/icu
-  ## queries) into every compile, while this module deliberately links
-  ## only `pkg-config harfbuzz`.
   var desc = fontDict.dictGet("FontDescriptor")
   if desc.kind == coRef:
     desc = d.resolve(desc)
