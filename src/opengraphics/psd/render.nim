@@ -39,6 +39,7 @@
 import std/math
 import std/options
 
+import ./adjustments
 import ./document
 import ./error
 import ./layers
@@ -439,6 +440,93 @@ proc sampleAt(m: MaskSampler, x, y: int): int =
     v = v * vv div 255
   v
 
+# --- adjustment layers --------------------------------------------------------
+#
+# An adjustment layer has no pixels of its own: it transforms the backdrop
+# beneath it, then blends the result back with its opacity, mask, clipping
+# and blend mode. Layouts live in `psd/adjustments`; evaluation here follows
+# `references/photocraft/crates/compose/src/adjust.rs` (clean-room: formulas
+# only). Only the exact 8-bit kinds are applied yet; anything else stays
+# transparent, which is the previous behaviour.
+
+const
+  LevelsToePower = 2.2
+  LegacyPivot = 128.0 / 255.0
+
+proc levelsGammaNim(u, g: float64): float64 =
+  ## Midtone gamma with the shadow toe Photoshop uses above gamma 1.
+  let c = 1.0 / g
+  if g <= 1.0:
+    return pow(u, c)
+  let a = pow(2.0, g)
+  let q = LevelsToePower
+  let u1 = pow((1.0 - c / q) / (a * (1.0 - 1.0 / q)), 1.0 / (1.0 - c))
+  if u >= u1 or u1 <= 0.0:
+    return pow(u, c)
+  let b = (a * u1 - pow(u1, c)) / pow(u1, q)
+  if b != b or b == Inf or b == NegInf: # non-finite
+    return pow(u, c)
+  a * u - b * pow(u, q)
+
+proc levelsChannelNim(ch: LevelsChannel, v: float64): float64 =
+  ## `levels_q` at the 8-bit quantum: every step rounds half up to a level.
+  const q = 255.0
+  let whole = proc(x: float64): float64 = floor(x * q + 0.5) / q
+  let rng = max(float64(ch.inWhite) - float64(ch.inBlack), 1e-6)
+  let vq = round(v * q) / q
+  let u = floor(clamp((vq - float64(ch.inBlack)) / rng, 0.0, 1.0) * q +
+    0.5 + 1e-3) / q
+  let t = whole(levelsGammaNim(u, max(float64(ch.gamma), 0.01)))
+  whole(float64(ch.outBlack) + t *
+    (float64(ch.outWhite) - float64(ch.outBlack)))
+
+proc adjustPixel*(adj: Adjustment, r, g, b: int): tuple[r, g, b: int] =
+  ## One 8-bit RGB pixel through a supported adjustment. Callers check
+  ## `isSupportedAdjustment` first; unsupported kinds return the pixel.
+  case adj.kind
+  of akInvert:
+    (255 - r, 255 - g, 255 - b)
+  of akThreshold:
+    let t = round(float64(adj.threshold) * 255.0)
+    let s = 30 * r + 59 * g + 11 * b
+    if float64(s) > 100.0 * t - 50.0: (255, 255, 255) else: (0, 0, 0)
+  of akPosterize:
+    let n = max(2, min(int(adj.posterizeLevels), 255))
+    let f = proc(v: int): int =
+      var bin = (v * n) div 256
+      if bin > n - 1: bin = n - 1
+      (bin * 255) div (n - 1)
+    (f(r), f(g), f(b))
+  of akLevels:
+    let f = proc(v: int, ch: LevelsChannel): int =
+      let x = levelsChannelNim(ch, float64(v) / 255.0)
+      clamp(int(round(levelsChannelNim(adj.levelsMaster, x) * 255.0)), 0, 255)
+    (f(r, adj.levelsChannels[0]), f(g, adj.levelsChannels[1]),
+      f(b, adj.levelsChannels[2]))
+  of akBrightnessContrast:
+    if not adj.bcLegacy:
+      return (r, g, b)
+    let bb = float64(adj.brightness) / 255.0
+    let cc = clamp(float64(adj.contrast), -100.0, 99.0)
+    let k = if cc >= 0.0: 1.0 / (1.0 - cc / 100.0) else: 1.0 + cc / 100.0
+    let (pre, post) = if cc >= 0.0: (bb, 0.0) else: (0.0, bb)
+    let f = proc(v: int): int =
+      let x = ((float64(v) / 255.0 + pre - LegacyPivot) * k +
+        LegacyPivot + post) * 255.0
+      clamp(int(round(x)), 0, 255)
+    (f(r), f(g), f(b))
+  else:
+    (r, g, b)
+
+proc isSupportedAdjustment*(adj: Adjustment): bool =
+  ## Kinds `applyAdjustmentLayer` evaluates. Everything else (curves, hue,
+  ## exposure, modern brightness/contrast, ...) stays transparent until its
+  ## own commit rather than guessing a formula.
+  case adj.kind
+  of akInvert, akThreshold, akPosterize, akLevels: true
+  of akBrightnessContrast: adj.bcLegacy
+  else: false
+
 proc compositeOver(dst: var Rgba, src: Rgba, mode: BlendMode, opacity,
     maskValue: int) =
   ## Source-over blend of one layer pixel onto the canvas.
@@ -615,6 +703,56 @@ proc blendLayerOnto(doc: Document, index: int, li: LayerImage,
       compositeOver(dp, spx, mode, opacity, mv)
       canvas.setPixel(x, y, dp)
 
+proc applyAdjustmentLayer*(doc: Document, index: int, canvas: var ImageBuf,
+    groupOpacity: int, base: ClipBase) =
+  ## Transform the canvas through one adjustment layer, in place.
+  let layer = doc.layers()[index]
+  let opacity = layer.opacity * groupOpacity div 255
+  if opacity <= 0 or canvas.isEmpty():
+    return
+  let adjOpt = adjustmentOf(layer)
+  if adjOpt.isNone or not isSupportedAdjustment(adjOpt.get()):
+    return
+  let adj = adjOpt.get()
+  var mode = blendModeFromKey(layer.blendMode)
+  if mode == bmPassThrough:
+    mode = bmNormal
+  let dissolve = mode == bmDissolve
+  let mask = if layer.layerMask().isSome or layer.hasVectorMask:
+               initMaskSampler(doc, index)
+             else: MaskSampler()
+  let defaultRanges = layer.blendingRanges.ranges()
+  let blendIf = if defaultRanges.len == 0 or isDefaultBlendIf(defaultRanges):
+                  @[] else: defaultRanges
+  let clipped = layer.clipping != 0
+  for y in 0 ..< canvas.height:
+    for x in 0 ..< canvas.width:
+      if clipped:
+        if not base.has or x < int(base.rect.left) or
+            x >= int(base.rect.right) or y < int(base.rect.top) or
+            y >= int(base.rect.bottom):
+          continue
+        let bpx = base.img.getPixel(x - int(base.rect.left),
+          y - int(base.rect.top))
+        if bpx.a == 0:
+          continue
+      if dissolve and not dissolveKeeps(x, y, opacity):
+        continue
+      var dp = canvas.getPixel(x, y)
+      if dp.a == 0:
+        continue
+      var mv = if mask.present: mask.sampleAt(x, y) else: 255
+      if blendIf.len > 0:
+        let ifCov = blendIfAt(blendIf, compositeGrayOf(dp),
+          compositeGrayOf(dp), compositeGrayOf(dp))
+        mv = mv * ifCov div 255
+        if mv == 0:
+          continue
+      let (ar, ag, ab) = adjustPixel(adj, int(dp.r), int(dp.g), int(dp.b))
+      var src = Rgba(r: uint8(ar), g: uint8(ag), b: uint8(ab), a: 255)
+      compositeOver(dp, src, mode, opacity, mv)
+      canvas.setPixel(x, y, dp)
+
 proc groupIsIsolated(l: LayerRecord): bool =
   ## Whether a group's children are composited as a unit rather than blended
   ## straight into the backdrop beneath the group.
@@ -662,6 +800,9 @@ proc renderSiblings(doc: Document, nodes: seq[LayerNode], canvas: var ImageBuf,
     else:
       let idx = layerIndexOf(doc, n.layer)
       if idx < 0:
+        continue
+      if n.layer.isAdjustmentLayer():
+        applyAdjustmentLayer(doc, idx, canvas, groupOpacity, base)
         continue
       let li = doc.layerImage(idx)
       blendLayerOnto(doc, idx, li, canvas, groupOpacity, base)

@@ -262,3 +262,93 @@ test "real fixture render tracks stored composite":
   check opaque == img.data.len
   check same > 400000 # ~98% exact; text effects account for the rest
   check img.getPixel(0, 0) == doc.compositeImage().getPixel(0, 0)
+
+# --- adjustment layers as live adjustments -----------------------------------
+
+proc adjBytesU16(v: uint16): seq[byte] =
+  @[byte(v shr 8), byte(v and 0xFF)]
+
+proc adjBytesI16(v: int16): seq[byte] =
+  adjBytesU16(cast[uint16](v))
+
+proc adjLayer(name, key: string, payload: seq[byte], opacity = 255'u8,
+    clipping = 0'u8): TestLayerSpec =
+  TestLayerSpec(name: name, top: 0, left: 0, bottom: 2, right: 2,
+    planes: @[], channelIds: @[], useRle: false, blendKey: "norm",
+    opacity: opacity, clipping: clipping, flags: 0, lsct: -1, lsdk: -1,
+    extra: @[(key, payload)])
+
+proc identityLevl(): seq[byte] =
+  result = adjBytesU16(0)
+  for _ in 0 ..< 5: # master + 3 channels + black, all 0..255 gamma 100
+    for v in [0'u16, 255, 0, 255, 100]:
+      result.add(adjBytesU16(v))
+
+test "invert adjustment flips the backdrop":
+  let doc = docOf(@[
+    solid("blue", 0, 0, 255),
+    adjLayer("inv", "nvrt", @[]),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 255, g: 255, b: 0, a: 255)
+
+test "invert at half opacity blends":
+  let doc = docOf(@[
+    solid("blue", 0, 0, 255),
+    adjLayer("inv", "nvrt", @[], opacity = 128),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 128, g: 128, b: 127, a: 255)
+
+test "threshold splits on luminosity":
+  let lo = adjBytesU16(200) & adjBytesU16(0)
+  let hi = adjBytesU16(100) & adjBytesU16(0)
+  let gray128 = solid("gray", 128, 128, 128)
+  check renderDocument(docOf(@[gray128,
+    adjLayer("th-lo", "thrs", lo)])).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 0, a: 255)
+  check renderDocument(docOf(@[gray128,
+    adjLayer("th-hi", "thrs", hi)])).getPixel(0, 0) ==
+    Rgba(r: 255, g: 255, b: 255, a: 255)
+
+test "posterize levels 2 pushes mid gray white, dark stays black":
+  let p2 = adjBytesU16(2) & adjBytesU16(0)
+  check renderDocument(docOf(@[solid("mid", 128, 128, 128),
+    adjLayer("p", "post", p2)])).getPixel(0, 0) ==
+    Rgba(r: 255, g: 255, b: 255, a: 255)
+  check renderDocument(docOf(@[solid("dark", 64, 64, 64),
+    adjLayer("p", "post", p2)])).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 0, a: 255)
+
+test "identity levels leaves the backdrop alone":
+  let doc = docOf(@[
+    solid("red", 255, 0, 0),
+    adjLayer("lv", "levl", identityLevl()),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 255, g: 0, b: 0, a: 255)
+
+test "legacy brightness lifts gray by the slider":
+  let brit = adjBytesI16(40) & adjBytesI16(0)
+  let doc = docOf(@[
+    solid("gray", 128, 128, 128),
+    adjLayer("bc", "brit", brit),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 168, g: 168, b: 168, a: 255)
+
+test "unsupported adjustment stays transparent":
+  let doc = docOf(@[
+    solid("blue", 0, 0, 255),
+    adjLayer("vib", "vibA", @[byte(1), 2, 3]),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 255, a: 255)
+
+test "adjustment at zero opacity does nothing":
+  let doc = docOf(@[
+    solid("blue", 0, 0, 255),
+    adjLayer("inv", "nvrt", @[], opacity = 0),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 255, a: 255)
