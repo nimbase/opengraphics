@@ -858,3 +858,90 @@ test "selective truncated stays transparent":
   ])
   check renderDocument(doc).getPixel(0, 0) ==
     Rgba(r: 0, g: 0, b: 255, a: 255)
+
+# --- hue/saturation --------------------------------------------------------
+
+type
+  HueRangeSpec = tuple[bounds: array[4, int16], h, s, l: int16]
+
+proc huePayload(col: bool, hue, sat, lig: int16,
+    ranges: seq[HueRangeSpec] = @[]): seq[byte] =
+  ## `hue2`: version, colorize flag, master hue/sat/lightness, then six
+  ## ranges of four bound degrees plus hue/sat/lightness edits.
+  result = adjBytesU16(2)
+  result.add(if col: byte(1) else: byte(0))
+  result.add(byte(0))
+  result.add(adjBytesI16(hue))
+  result.add(adjBytesI16(sat))
+  result.add(adjBytesI16(lig))
+  while result.len < 12:
+    result.add(byte(0))
+  if ranges.len > 0:
+    while result.len < 16:
+      result.add(byte(0))
+    var rs = ranges
+    while rs.len < 6:
+      rs.add((bounds: [0'i16, 0, 0, 0], h: 0'i16, s: 0'i16, l: 0'i16))
+    for r in rs:
+      for b in r.bounds:
+        result.add(adjBytesI16(b))
+      result.add(adjBytesI16(r.h))
+      result.add(adjBytesI16(r.s))
+      result.add(adjBytesI16(r.l))
+
+test "huesat saturation moves match the oracle":
+  # Measured in Photoshop: (204,102,102) +50% -> (254,51,51) and -50% ->
+  # (178,127,127); the port rounds half away where Photoshop sits on the
+  # other side of the level, inside the reference's own +/-2 bar.
+  let up = huePayload(false, 0, 50, 0)
+  check renderDocument(docOf(@[solid("p", 204, 102, 102),
+    adjLayer("hs", "hue2", up)])).getPixel(0, 0) ==
+    Rgba(r: 255, g: 51, b: 51, a: 255)
+  let dn = huePayload(false, 0, -50, 0)
+  check renderDocument(docOf(@[solid("p", 204, 102, 102),
+    adjLayer("hs", "hue2", dn)])).getPixel(0, 0) ==
+    Rgba(r: 179, g: 128, b: 128, a: 255)
+
+test "huesat hue rotation turns red to cyan":
+  let c = huePayload(false, 180, 0, 0)
+  check renderDocument(docOf(@[solid("red", 255, 0, 0),
+    adjLayer("hs", "hue2", c)])).getPixel(0, 0) ==
+    Rgba(r: 0, g: 255, b: 255, a: 255)
+
+test "huesat colorize builds the hue at the lightness":
+  # Photoshop oracles: black -> (0,152,0), mid gray -> (120,96,73).
+  let c = huePayload(true, 120, 100, 30)
+  check renderDocument(docOf(@[solid("blk", 0, 0, 0),
+    adjLayer("hs", "hue2", c)])).getPixel(0, 0) ==
+    Rgba(r: 0, g: 153, b: 0, a: 255)
+  let c2 = huePayload(true, 30, 25, -40)
+  check renderDocument(docOf(@[solid("mid", 160, 160, 160),
+    adjLayer("hs", "hue2", c2)])).getPixel(0, 0) ==
+    Rgba(r: 120, g: 96, b: 72, a: 255)
+
+test "huesat range lightness lifts the range toward white":
+  let reds: HueRangeSpec = (bounds: [-30'i16, -10, 10, 30], h: 0'i16,
+    s: 0'i16, l: 50'i16)
+  let c = huePayload(false, 0, 0, 0, @[reds])
+  check renderDocument(docOf(@[solid("red", 255, 0, 0),
+    adjLayer("hs", "hue2", c)])).getPixel(0, 0) ==
+    Rgba(r: 255, g: 128, b: 128, a: 255)
+
+test "huesat full range lightness whitens the range, spares gray":
+  let reds: HueRangeSpec = (bounds: [-30'i16, -10, 10, 30], h: 0'i16,
+    s: 0'i16, l: 100'i16)
+  let c = huePayload(false, 0, 0, 0, @[reds])
+  check renderDocument(docOf(@[solid("gray", 128, 128, 128),
+    adjLayer("hs", "hue2", c)])).getPixel(0, 0) ==
+    Rgba(r: 128, g: 128, b: 128, a: 255)
+  check renderDocument(docOf(@[solid("red", 255, 0, 0),
+    adjLayer("hs", "hue2", c)])).getPixel(0, 0) ==
+    Rgba(r: 255, g: 255, b: 255, a: 255)
+
+test "huesat truncated stays transparent":
+  let doc = docOf(@[
+    solid("blue", 0, 0, 255),
+    adjLayer("hs", "hue2", @[byte(0), 1, 2, 3]),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 255, a: 255)

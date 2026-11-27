@@ -625,6 +625,120 @@ proc photoPixel*(m: array[3, array[3, float64]], preserve: bool,
 type
   GradientStop* = tuple[pos: float64, rgb: array[3, float64]]
 
+  HueSatTables* = tuple[hasRanges: bool,
+    dh, ds, dl: seq[float64]]
+
+proc remEuclidNim(a, b: float64): float64 =
+  ## Non-negative remainder for positive `b`, like Rust's `rem_euclid`.
+  a - floor(a / b) * b
+
+proc rgbToHslNim*(c: array[3, float64]): tuple[h, s, l: float64] =
+  let mx = max(c[0], max(c[1], c[2]))
+  let mn = min(c[0], min(c[1], c[2]))
+  let l = (mx + mn) / 2.0
+  if abs(mx - mn) < 1e-7:
+    return (0.0, 0.0, l)
+  let d = mx - mn
+  let s = if l > 0.5: d / (2.0 - mx - mn) else: d / (mx + mn)
+  let h =
+    if mx == c[0]: remEuclidNim((c[1] - c[2]) / d, 6.0)
+    elif mx == c[1]: (c[2] - c[0]) / d + 2.0
+    else: (c[0] - c[1]) / d + 4.0
+  (h / 6.0, s, l)
+
+proc hueRgbNim(h, p, q: float64): array[3, float64] =
+  proc f(t: float64): float64 =
+    let tt = remEuclidNim(t, 1.0)
+    if tt < 1.0 / 6.0: p + (q - p) * 6.0 * tt
+    elif tt < 0.5: q
+    elif tt < 2.0 / 3.0: p + (q - p) * (2.0 / 3.0 - tt) * 6.0
+    else: p
+  [f(h + 1.0 / 3.0), f(h), f(h - 1.0 / 3.0)]
+
+proc hslToRgbNim*(h, s, l: float64): array[3, float64] =
+  if s <= 0.0:
+    return [l, l, l]
+  let q = if l < 0.5: l * (1.0 + s) else: l + s - l * s
+  hueRgbNim(h, 2.0 * l - q, q)
+
+proc hueSatPixelNim*(c: array[3, float64], hue, s, l: float64,
+    colorize: bool): array[3, float64] =
+  ## One Hue/Saturation evaluation: hue in degrees, saturation and
+  ## lightness as -1..1 fractions.
+  if colorize:
+    let ll = rgbToHslNim(c).l
+    let lighten = if l > 0.0: ll + (1.0 - ll) * l else: ll * (1.0 + l)
+    return hslToRgbNim(remEuclidNim(hue, 360.0) / 360.0,
+      min(abs(s), 1.0), lighten)
+  let lighten = proc(v: float64): float64 =
+    if l > 0.0: v + (1.0 - v) * l else: v * (1.0 + l)
+  let lc = [lighten(c[0]), lighten(c[1]), lighten(c[2])]
+  let (hh, ss, ll) = rgbToHslNim(lc)
+  let hh2 = remEuclidNim(hh + hue / 360.0, 1.0)
+  var ss2 = if s > 0.0: ss / max(1.0 - s, 1.0 / 512.0)
+    else: ss * (1.0 + s)
+  ss2 = clamp(ss2, 0.0, 1.0)
+  hslToRgbNim(hh2, ss2, ll)
+
+proc rangeWeightNim*(bounds: array[4, float64],
+    deg: float64): float64 =
+  ## How much a hue in degrees belongs to a range, 0..1, wrap-aware.
+  let a = bounds[0]
+  proc rel(x: float64): float64 =
+    if x != x: 0.0 else: remEuclidNim(x - a, 360.0)
+  let b = rel(bounds[1])
+  var c = rel(bounds[2])
+  if c < b:
+    c = b
+  var d = rel(bounds[3])
+  if d < c:
+    d = c
+  let h = rel(deg)
+  if h <= b:
+    if b <= 0.0: 1.0 else: h / b
+  elif h <= c:
+    1.0
+  elif h <= d:
+    if d <= c: 1.0 else: (d - h) / (d - c)
+  else:
+    0.0
+
+proc hueSatTablesFor*(adj: Adjustment): HueSatTables =
+  ## Per-hue range tables (4096 entries over the color wheel), or no ranges.
+  for r in adj.hueRanges:
+    if r.hue != 0.0f32 or r.saturation != 0.0f32 or r.lightness != 0.0f32:
+      result.hasRanges = true
+      break
+  if not result.hasRanges:
+    return
+  const N = 4096
+  result.dh = newSeq[float64](N)
+  result.ds = newSeq[float64](N)
+  result.dl = newSeq[float64](N)
+  for k in 0 ..< N:
+    let deg = float64(k) / float64(N - 1) * 360.0
+    var acc = [0.0, 0.0, 0.0]
+    for r in adj.hueRanges:
+      if r.hue == 0.0f32 and r.saturation == 0.0f32 and
+          r.lightness == 0.0f32:
+        continue
+      let w = rangeWeightNim([float64(r.bounds[0]), float64(r.bounds[1]),
+        float64(r.bounds[2]), float64(r.bounds[3])], deg)
+      acc[0] += w * float64(r.hue)
+      acc[1] += w * float64(r.saturation) / 100.0
+      acc[2] += w * float64(r.lightness) / 100.0
+    result.dh[k] = acc[0]
+    result.ds[k] = acc[1]
+    result.dl[k] = acc[2]
+
+proc hueSatLutNim*(tab: openArray[float64], v: float64): float64 =
+  ## Linear sample of a hue table at 0..1 turns.
+  let x = clamp(v, 0.0, 1.0) * float64(tab.len - 1)
+  let i = min(int(x), tab.len - 2)
+  let f = x - float64(i)
+  tab[i] * (1.0 - f) + tab[i + 1] * f
+
+type
   BalanceCurveNim* = tuple[b, w, e: float64, hasKnee: bool,
     u0, s0, kp, kd: float64]
 
@@ -852,7 +966,7 @@ proc isSupportedAdjustment*(adj: Adjustment): bool =
   case adj.kind
   of akInvert, akThreshold, akPosterize, akLevels, akCurves, akExposure,
      akChannelMixer, akBlackWhite, akPhotoFilter, akGradientMap,
-     akColorBalance, akSelectiveColor: true
+     akColorBalance, akSelectiveColor, akHueSaturation: true
   of akBrightnessContrast: adj.bcLegacy
   else: false
 
@@ -1067,6 +1181,9 @@ proc applyAdjustmentLayer*(doc: Document, index: int, canvas: var ImageBuf,
     for ch in 0 ..< 3:
       balT[ch] = balanceCurveFor(adj.cbShadows, adj.cbMidtones,
         adj.cbHighlights, adj.cbPreserve, ch)
+  let isHueSat = adj.kind == akHueSaturation
+  let hueT = if isHueSat: hueSatTablesFor(adj)
+    else: default(HueSatTables)
   let dissolve = mode == bmDissolve
   let mask = if layer.layerMask().isSome or layer.hasVectorMask:
                initMaskSampler(doc, index)
@@ -1121,6 +1238,28 @@ proc applyAdjustmentLayer*(doc: Document, index: int, canvas: var ImageBuf,
           (clamp(int(round(balanceEvalNim(balT[0], float64(dp.r) / 255.0) * 255.0)), 0, 255),
             clamp(int(round(balanceEvalNim(balT[1], float64(dp.g) / 255.0) * 255.0)), 0, 255),
             clamp(int(round(balanceEvalNim(balT[2], float64(dp.b) / 255.0) * 255.0)), 0, 255))
+        elif isHueSat:
+          let c = [float64(dp.r) / 255.0, float64(dp.g) / 255.0,
+            float64(dp.b) / 255.0]
+          var dh, ds, dl = 0.0
+          if hueT.hasRanges:
+            let h0 = rgbToHslNim(c).h
+            dh = hueSatLutNim(hueT.dh, h0)
+            ds = hueSatLutNim(hueT.ds, h0)
+            dl = hueSatLutNim(hueT.dl, h0)
+          let s = clamp(float64(adj.saturation) / 100.0 + ds, -1.0, 1.0)
+          let li = clamp(float64(adj.lightness) / 100.0, -1.0, 1.0)
+          var o = hueSatPixelNim(c, float64(adj.hue) + dh, s, li,
+            adj.hueColorize)
+          let l = clamp(dl, -1.0, 1.0)
+          let tgt =
+            if l > 0.0: max(o[0], max(o[1], o[2]))
+            else: min(o[0], min(o[1], o[2]))
+          o = [o[0] + (tgt - o[0]) * abs(l), o[1] + (tgt - o[1]) * abs(l),
+            o[2] + (tgt - o[2]) * abs(l)]
+          (clamp(int(round(o[0] * 255.0)), 0, 255),
+            clamp(int(round(o[1] * 255.0)), 0, 255),
+            clamp(int(round(o[2] * 255.0)), 0, 255))
         else:
           adjustPixel(adj, int(dp.r), int(dp.g), int(dp.b))
       var src = Rgba(r: uint8(ar), g: uint8(ag), b: uint8(ab), a: 255)
