@@ -629,6 +629,20 @@ proc adjustPixel*(adj: Adjustment, r, g, b: int): tuple[r, g, b: int] =
         lin = pow(lin, 1.0 / gam)
       clamp(int(round(pow(lin, 1.0 / 2.2) * 255.0)), 0, 255)
     (f(r), f(g), f(b))
+  of akChannelMixer:
+    # Straight matrix on the channel levels: out = row.R*R + row.G*G +
+    # row.B*B + const*255, clamped. Monochrome uses the first row thrice.
+    let mx = adj.mixerMatrix
+    let f = proc(v0, v1, v2, row: int): int =
+      let m = mx[row]
+      let x = float64(m[0]) * float64(v0) + float64(m[1]) * float64(v1) +
+        float64(m[2]) * float64(v2) + float64(m[3]) * 255.0
+      clamp(int(round(x)), 0, 255)
+    if adj.mixerMono:
+      let x = f(r, g, b, 0)
+      (x, x, x)
+    else:
+      (f(r, g, b, 0), f(r, g, b, 1), f(r, g, b, 2))
   else:
     (r, g, b)
 
@@ -637,7 +651,8 @@ proc isSupportedAdjustment*(adj: Adjustment): bool =
   ## vibrance, modern brightness/contrast, color balance, ...) stays
   ## transparent until its own commit rather than guessing a formula.
   case adj.kind
-  of akInvert, akThreshold, akPosterize, akLevels, akCurves, akExposure: true
+  of akInvert, akThreshold, akPosterize, akLevels, akCurves, akExposure,
+     akChannelMixer: true
   of akBrightnessContrast: adj.bcLegacy
   else: false
 

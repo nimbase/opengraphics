@@ -509,3 +509,53 @@ test "exposure truncated stays transparent":
   ])
   check renderDocument(doc).getPixel(0, 0) ==
     Rgba(r: 0, g: 0, b: 255, a: 255)
+
+# --- channel mixer --------------------------------------------------------
+
+proc mixPayload(mono: uint16, rows: array[3, array[5, int16]]): seq[byte] =
+  ## `mixr`: version + mono flag, then three rows of five i16 (slot 3 is the
+  ## unused black slot, slot 4 the constant), all in percent.
+  result = adjBytesU16(1) & adjBytesU16(mono)
+  for row in rows:
+    for v in row:
+      result.add(adjBytesI16(v))
+
+const
+  mixIdentity = [[100'i16, 0, 0, 0, 0], [0'i16, 100, 0, 0, 0],
+    [0'i16, 0, 100, 0, 0]]
+  mixSwapRB = [[0'i16, 0, 100, 0, 0], [0'i16, 100, 0, 0, 0],
+    [100'i16, 0, 0, 0, 0]]
+  mixLuma = [[30'i16, 59, 11, 0, 0], [0'i16, 0, 0, 0, 0], [0'i16, 0, 0, 0, 0]]
+
+test "mixer identity leaves the backdrop alone":
+  let doc = docOf(@[
+    solid("red", 255, 0, 0),
+    adjLayer("mx", "mixr", mixPayload(0, mixIdentity)),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 255, g: 0, b: 0, a: 255)
+
+test "mixer swaps red and blue":
+  let doc = docOf(@[
+    solid("red", 255, 0, 0),
+    adjLayer("mx", "mixr", mixPayload(0, mixSwapRB)),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 255, a: 255)
+
+test "mixer mono maps red to luma gray":
+  # 30% of 255 = 76.5, just above halfway, so 77.
+  let doc = docOf(@[
+    solid("red", 255, 0, 0),
+    adjLayer("mx", "mixr", mixPayload(1, mixLuma)),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 77, g: 77, b: 77, a: 255)
+
+test "mixer truncated stays transparent":
+  let doc = docOf(@[
+    solid("blue", 0, 0, 255),
+    adjLayer("mx", "mixr", @[byte(0), 1]),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 255, a: 255)
