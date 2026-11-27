@@ -616,15 +616,28 @@ proc adjustPixel*(adj: Adjustment, r, g, b: int): tuple[r, g, b: int] =
         LegacyPivot + post) * 255.0
       clamp(int(round(x)), 0, 255)
     (f(r), f(g), f(b))
+  of akExposure:
+    # Linear light through Gamma 2.2, the document tone curve Photoshop uses
+    # for RGB exposure: (lin*2^exposure + offset)^(1/gamma), back to levels.
+    let m = pow(2.0, float64(adj.exposure))
+    let gam = max(float64(adj.gamma), 0.01)
+    let f = proc(v: int): int =
+      var lin = pow(float64(v) / 255.0, 2.2) * m + float64(adj.offset)
+      if lin < 0.0:
+        lin = 0.0
+      if gam != 1.0:
+        lin = pow(lin, 1.0 / gam)
+      clamp(int(round(pow(lin, 1.0 / 2.2) * 255.0)), 0, 255)
+    (f(r), f(g), f(b))
   else:
     (r, g, b)
 
 proc isSupportedAdjustment*(adj: Adjustment): bool =
-  ## Kinds `applyAdjustmentLayer` evaluates. Everything else (curves, hue,
-  ## exposure, modern brightness/contrast, ...) stays transparent until its
-  ## own commit rather than guessing a formula.
+  ## Kinds `applyAdjustmentLayer` evaluates. Everything else (hue/saturation,
+  ## vibrance, modern brightness/contrast, color balance, ...) stays
+  ## transparent until its own commit rather than guessing a formula.
   case adj.kind
-  of akInvert, akThreshold, akPosterize, akLevels, akCurves: true
+  of akInvert, akThreshold, akPosterize, akLevels, akCurves, akExposure: true
   of akBrightnessContrast: adj.bcLegacy
   else: false
 

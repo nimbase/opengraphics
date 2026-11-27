@@ -445,3 +445,67 @@ test "curves bad version stays transparent":
   ])
   check renderDocument(doc).getPixel(0, 0) ==
     Rgba(r: 0, g: 0, b: 255, a: 255)
+
+# --- exposure -------------------------------------------------------------
+
+proc f32be(v: float32): seq[byte] =
+  let bits = cast[uint32](v)
+  @[byte(bits shr 24), byte((bits shr 16) and 0xFF),
+    byte((bits shr 8) and 0xFF), byte(bits and 0xFF)]
+
+proc expPayload(e, o, g: float32): seq[byte] =
+  ## `expA`: 2 version bytes, then exposure, offset, gamma as f32BE.
+  result = adjBytesU16(1)
+  result.add(f32be(e))
+  result.add(f32be(o))
+  result.add(f32be(g))
+
+test "exposure identity leaves the backdrop alone":
+  let doc = docOf(@[
+    solid("gray", 128, 128, 128),
+    adjLayer("ex", "expA", expPayload(0, 0, 1)),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 128, g: 128, b: 128, a: 255)
+
+test "exposure offset matches the measured oracle":
+  # Photoshop corpus via the reference: offset 0.1738 lifts 76 to 134.
+  let doc = docOf(@[
+    solid("gray", 76, 76, 76),
+    adjLayer("ex", "expA", expPayload(0, 0.1738, 1)),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 134, g: 134, b: 134, a: 255)
+
+test "exposure plus one stop brightens mid gray":
+  let doc = docOf(@[
+    solid("gray", 128, 128, 128),
+    adjLayer("ex", "expA", expPayload(1, 0, 1)),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 175, g: 175, b: 175, a: 255)
+
+test "exposure gamma darkens through linear light":
+  let doc = docOf(@[
+    solid("gray", 128, 128, 128),
+    adjLayer("ex", "expA", expPayload(0, 0, 2)),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 181, g: 181, b: 181, a: 255)
+
+test "exposure keeps black black and clamps white":
+  let c = expPayload(1, 0, 1)
+  check renderDocument(docOf(@[solid("blk", 0, 0, 0),
+    adjLayer("ex", "expA", c)])).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 0, a: 255)
+  check renderDocument(docOf(@[solid("wht", 255, 255, 255),
+    adjLayer("ex", "expA", c)])).getPixel(0, 0) ==
+    Rgba(r: 255, g: 255, b: 255, a: 255)
+
+test "exposure truncated stays transparent":
+  let doc = docOf(@[
+    solid("blue", 0, 0, 255),
+    adjLayer("ex", "expA", @[byte(0), 1]),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 255, a: 255)
