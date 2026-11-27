@@ -18,7 +18,8 @@
 import std/os
 import std/options
 import std/sequtils
-import posix
+when not defined(windows):
+  import posix
 import unittest
 
 import ../src/opengraphics/psd
@@ -35,15 +36,19 @@ proc bigFixture(): string = largeFixture()
 proc peakRss(): int64 =
   ## Peak resident set size in bytes. Monotonic, so it answers "how much more
   ## memory did this cost" as a lower bound rather than an exact figure.
-  var ru: Rusage
-  if getrusage(RUSAGE_SELF, addr ru) == 0:
-    # Linux reports kilobytes; the BSDs and macOS report bytes.
-    when defined(linux):
-      result = int64(ru.ru_maxrss) * 1024
-    else:
-      result = int64(ru.ru_maxrss)
-  else:
+  ## -1 on Windows, which has no `getrusage`: RSS assertions skip there.
+  when defined(windows):
     result = -1
+  else:
+    var ru: Rusage
+    if getrusage(RUSAGE_SELF, addr ru) == 0:
+      # Linux reports kilobytes; the BSDs and macOS report bytes.
+      when defined(linux):
+        result = int64(ru.ru_maxrss) * 1024
+      else:
+        result = int64(ru.ru_maxrss)
+    else:
+      result = -1
 
 proc inside(s: Span, src: Source): bool =
   ## True when `s`'s bytes are inside `src`'s own buffer rather than a copy.
@@ -186,7 +191,13 @@ suite "zero-copy: peak memory does not scale with file size":
     let growth = peakRss() - before
     for t in trees:
       check t.layers().len == 3
-    check growth < int64(bytes.len) * 4
+    if before < 0:
+      # No peak-RSS source on Windows (`getrusage` does not exist there), so
+      # a growth figure would measure nothing. Note: `skip()` only marks the
+      # test skipped, it does not stop the body, so the guard is a branch.
+      skip()
+    else:
+      check growth < int64(bytes.len) * 4
 
 suite "mmap: opening from disk":
   test "openPsd maps and still decodes":
