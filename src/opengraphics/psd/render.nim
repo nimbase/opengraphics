@@ -738,6 +738,54 @@ proc hueSatLutNim*(tab: openArray[float64], v: float64): float64 =
   let f = x - float64(i)
   tab[i] * (1.0 - f) + tab[i + 1] * f
 
+const
+  VibranceBoost* = [0.5001, 0.0887, 0.4374, 0.7573, -0.8113, 0.5154, 2.8026]
+  VibranceGrey* = [0.288, 0.712]
+
+proc vibranceHsvHue(c: array[3, float64], mx, mn: float64): float64 =
+  ## HSV hue in degrees, given the extreme channels.
+  let d = mx - mn
+  let h =
+    if mx == c[0]: remEuclidNim((c[1] - c[2]) / d, 6.0)
+    elif mx == c[1]: (c[2] - c[0]) / d + 2.0
+    else: (c[0] - c[1]) / d + 4.0
+  h * 60.0
+
+proc vibranceSkin(h: float64): float64 =
+  ## How much positive Vibrance treats a hue as skin: full on 0-30 degrees,
+  ## fading out by 45 and back in from 300.
+  if h <= 30.0: 1.0
+  elif h < 45.0: (45.0 - h) / 15.0
+  elif h < 300.0: 0.0
+  else: (h - 300.0) / 60.0
+
+proc vibranceLinNim*(c: array[3, float64], v: float64): array[3, float64] =
+  ## The Vibrance slider on a linear-light pixel: saturation `t` and peak `V`
+  ## reshaped, positives boosted away from skin hues.
+  let mx = max(c[0], max(c[1], c[2]))
+  let mn = min(c[0], min(c[1], c[2]))
+  if mx <= 0.0 or mx - mn <= 1e-9:
+    return c
+  let t = 1.0 - mn / mx
+  let shape = t * (1.0 - t) * (2.0 - t + t * t) * mx * max(1.0 - mx, 0.0)
+  var t2, v2: float64
+  if v < 0.0:
+    let a = -v
+    t2 = t * (1.0 - a / 4.0) * (1.0 - a + a * t * (1.0 + t) / 2.0)
+    v2 = mx - a * shape
+  else:
+    let w = vibranceSkin(vibranceHsvHue(c, mx, mn))
+    let a = v * (1.0 - w) + 0.64 * pow(v, 1.6) * w
+    let boost = exp((VibranceBoost[0] * a + VibranceBoost[1] * a * a) *
+      pow(t, VibranceBoost[2]) * pow(1.0 - t, VibranceBoost[3]) *
+      ((VibranceBoost[4] + VibranceBoost[5] * a +
+        VibranceBoost[6] * (1.0 - t)) * max(1.0 - mx, 0.0)))
+    t2 = min(t * (1.0 + boost), 1.0)
+    v2 = mx + v / 4.0 * shape
+  let m2 = v2 * (1.0 - t2)
+  let k = (v2 - m2) / (mx - mn)
+  [m2 + (c[0] - mn) * k, m2 + (c[1] - mn) * k, m2 + (c[2] - mn) * k]
+
 type
   BalanceCurveNim* = tuple[b, w, e: float64, hasKnee: bool,
     u0, s0, kp, kd: float64]
@@ -956,6 +1004,26 @@ proc adjustPixel*(adj: Adjustment, r, g, b: int): tuple[r, g, b: int] =
         dd += d * w[rr]
       o[i] = clamp(int(round((c[i] - dd) * 255.0)), 0, 255)
     (o[0], o[1], o[2])
+  of akVibrance:
+    # Both sliders work in linear light through the sRGB tone curve:
+    # Vibrance reshapes saturation and peak first, then Saturation moves
+    # each channel away from the R/G grey.
+    let vv = float64(adj.vibrance) / 100.0
+    let ss = float64(adj.satBoost) / 100.0
+    if vv == 0.0 and ss == 0.0:
+      return (r, g, b)
+    var lin = [srgbToLinearNim(float64(r) / 255.0),
+      srgbToLinearNim(float64(g) / 255.0),
+      srgbToLinearNim(float64(b) / 255.0)]
+    if vv != 0.0:
+      lin = vibranceLinNim(lin, vv)
+    if ss != 0.0:
+      let gr = VibranceGrey[0] * lin[0] + VibranceGrey[1] * lin[1]
+      for i in 0 ..< 3:
+        lin[i] = clamp(gr + (1.0 + ss) * (lin[i] - gr), 0.0, 1.0)
+    (clamp(int(round(linearToSrgbNim(lin[0]) * 255.0)), 0, 255),
+      clamp(int(round(linearToSrgbNim(lin[1]) * 255.0)), 0, 255),
+      clamp(int(round(linearToSrgbNim(lin[2]) * 255.0)), 0, 255))
   else:
     (r, g, b)
 
@@ -966,7 +1034,7 @@ proc isSupportedAdjustment*(adj: Adjustment): bool =
   case adj.kind
   of akInvert, akThreshold, akPosterize, akLevels, akCurves, akExposure,
      akChannelMixer, akBlackWhite, akPhotoFilter, akGradientMap,
-     akColorBalance, akSelectiveColor, akHueSaturation: true
+     akColorBalance, akSelectiveColor, akHueSaturation, akVibrance: true
   of akBrightnessContrast: adj.bcLegacy
   else: false
 

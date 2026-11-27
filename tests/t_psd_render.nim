@@ -945,3 +945,58 @@ test "huesat truncated stays transparent":
   ])
   check renderDocument(doc).getPixel(0, 0) ==
     Rgba(r: 0, g: 0, b: 255, a: 255)
+
+# --- vibrance ---------------------------------------------------------------
+
+proc vibPayload(vib, strt: float64, hasVib = true,
+    hasStrt = true): seq[byte] =
+  ## `vibA`: versioned descriptor with the vibrance and saturation sliders.
+  var d = newDescriptor("null")
+  if hasVib:
+    discard d.add("vibrance", doubleValue(vib))
+  if hasStrt:
+    discard d.add("Strt", doubleValue(strt))
+  var w = initWriter()
+  w.putU32(16)
+  w.writeDescriptorBody(d)
+  let s = w.toString()
+  result = newSeq[byte](s.len)
+  for i, c in s:
+    result[i] = byte(c)
+
+test "vibrance zeros leave the backdrop alone":
+  let c = vibPayload(0, 0)
+  check renderDocument(docOf(@[solid("mut", 160, 120, 100),
+    adjLayer("vb", "vibA", c)])).getPixel(0, 0) ==
+    Rgba(r: 160, g: 120, b: 100, a: 255)
+
+test "vibrance lifts muted colors and spares gray":
+  # Cross-checked against an independent transcription of the reference
+  # linear-light fit (skin-damped boost, sRGB transfer in and out).
+  let c = vibPayload(50, 0)
+  check renderDocument(docOf(@[solid("mut", 160, 120, 100),
+    adjLayer("vb", "vibA", c)])).getPixel(0, 0) ==
+    Rgba(r: 162, g: 88, b: 0, a: 255)
+  check renderDocument(docOf(@[solid("gray", 128, 128, 128),
+    adjLayer("vb", "vibA", c)])).getPixel(0, 0) ==
+    Rgba(r: 128, g: 128, b: 128, a: 255)
+
+test "vibrance negative desaturates toward gray":
+  let c = vibPayload(-50, 0)
+  check renderDocument(docOf(@[solid("sat", 200, 50, 50),
+    adjLayer("vb", "vibA", c)])).getPixel(0, 0) ==
+    Rgba(r: 198, g: 96, b: 96, a: 255)
+
+test "vibrance saturation slider spreads from the grey":
+  let c = vibPayload(0, 50, hasVib = false)
+  check renderDocument(docOf(@[solid("mut", 160, 120, 100),
+    adjLayer("vb", "vibA", c)])).getPixel(0, 0) ==
+    Rgba(r: 171, g: 113, b: 77, a: 255)
+
+test "vibrance truncated stays transparent":
+  let doc = docOf(@[
+    solid("blue", 0, 0, 255),
+    adjLayer("vb", "vibA", @[byte(0), 1, 2]),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 255, a: 255)
