@@ -173,3 +173,42 @@ suite "docmeta: alternate colors and channel names":
 
   test "no channel names gives empty":
     check channelNames(@[]).len == 0
+
+suite "docmeta: annotations":
+  test "Anno text note parses":
+    var w = initWriter()
+    w.putU16(2)
+    w.putU16(1)
+    w.putU32(1)
+    var body = initWriter()
+    body.putStr4("txtA")
+    body.putU8(1)
+    body.putU8(0)
+    body.putU16(0)
+    for _ in 0 ..< 8: body.putI32(0)
+    body.putU16(0)
+    for _ in 0 ..< 4: body.putU16(0)
+    body.writePascal("me", 2)
+    body.writePascal("", 2)
+    body.writePascal("", 2)
+    var txt = "\xFE\xFF\x00H\x00i"
+    var db = initWriter()
+    db.putStr4("txtC")
+    db.putU32(uint32(txt.len))
+    db.put(txt)
+    let dbStr = db.toString()
+    body.putU32(uint32(dbStr.len + 4))
+    body.put(dbStr)
+    let bStr = body.toString()
+    w.putU32(uint32(bStr.len + 4))
+    w.put(bStr)
+    let notes = parseAnno(spanOf(w.toString()))
+    check notes.len == 1
+    check notes[0].text == "Hi"
+    check notes[0].open
+
+  test "short Anno raises":
+    var raised = false
+    try: discard parseAnno(spanOf("\x00\x01"))
+    except PsdError: raised = true
+    check raised

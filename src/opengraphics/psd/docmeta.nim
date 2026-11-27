@@ -13,6 +13,7 @@
 ## - Extra channels: merged planes beyond color+alpha (spot/alpha).
 
 import std/options
+import std/strutils
 
 import ./descriptor
 import ./error
@@ -260,4 +261,68 @@ proc channelNames*(resources: openArray[ImageResource]): seq[string] =
         if result.len > 0: return result
     except PsdError:
       continue
+  @[]
+
+type
+  Note* = object
+    author*, name*, text*: string
+    open*: bool
+
+proc parseAnno*(data: Span): seq[Note] =
+  ## Global `Anno` block: u16 major (=2), u16 minor (=1), u32 count, then per
+  ## annotation u32 length (incl. itself), type `txtA`/`sndA`, open u8, flags
+  ## u8, optional-blocks u16, icon rect + popup rect (4xi32 each), color
+  ## (u16 space + 4xu16), author/name/date Pascal strings, then u32 length of
+  ## the data block (`txtC`/`sndM`, u32 size, payload). Text is UTF-16BE with
+  ## BOM, lines separated by CR. Sound annotations are skipped (kept raw by
+  ## the file model).
+  if data.len < 8: invalid("short Anno block")
+  var r = initReader(data)
+  if r.readU16BE() != 2: invalid("unsupported Anno major version")
+  discard r.readU16BE() # minor
+  let n = int(r.readU32BE())
+  for _ in 0 ..< n:
+    if r.remaining() < 4: break
+    let ln = int(r.readU32BE())
+    if ln < 4 or ln - 4 > r.remaining(): break
+    var body = r.sub(ln - 4)
+    try:
+      let typ = body.readStr4()
+      let open = body.readU8() != 0
+      discard body.readU8() # flags
+      discard body.readU16BE() # optional blocks
+      for _ in 0 ..< 8: discard body.readI32BE() # icon + popup rects
+      discard body.readU16BE() # color space
+      for _ in 0 ..< 4: discard body.readU16BE()
+      let author = body.readPascal(2)
+      discard body.readPascal(2) # name
+      discard body.readPascal(2) # date
+      if body.remaining() < 4: continue
+      let dlen = int(body.readU32BE())
+      if dlen < 4 or dlen - 4 > body.remaining(): continue
+      var db = body.sub(dlen - 4)
+      let dtype = db.readStr4()
+      if typ == "txtA" and dtype == "txtC":
+        if db.remaining() < 4: continue
+        let size = int(db.readU32BE())
+        if size > db.remaining(): continue
+        let raw = db.bytes(min(size, db.remaining())).clone
+        # UTF-16BE with BOM; strip BOM, CR-separated.
+        var units: seq[uint16] = @[]
+        var i = 0
+        if raw.len >= 2 and ord(raw[0]) == 0xFE and ord(raw[1]) == 0xFF:
+          i = 2
+        while i + 1 < raw.len:
+          units.add((uint16(ord(raw[i])) shl 8) or uint16(ord(raw[i + 1])))
+          i += 2
+        result.add(Note(author: author, text: unicodeToString(units)
+          .replace("\r", "\n"), open: open))
+    except PsdError:
+      continue
+
+proc notesOf*(f: PsdFile): seq[Note] =
+  for b in f.globalBlocks:
+    if b.key == "Anno":
+      try: return parseAnno(b.data)
+      except PsdError: continue
   @[]
