@@ -23,9 +23,9 @@ test "README PSD snippet runs as written":
     echo node.layer.name()
   check doc.layerByName("nim-lang") == 1
 
-  doc.composite.savePpm("/tmp/readme_preview.ppm")
-  renderDocument(doc).savePpm("/tmp/readme_render.ppm")
-  check fileExists("/tmp/readme_render.ppm")
+  doc.composite.savePpm(getTempDir() / "readme_preview.ppm")
+  renderDocument(doc).savePpm(getTempDir() / "readme_render.ppm")
+  check fileExists(getTempDir() / "readme_render.ppm")
 
   for l in doc.layers:
     if l.isTextLayer():
@@ -46,5 +46,5 @@ test "README PSD snippet runs as written":
       let pl = l.placedLayer().get()
       echo l.name(), " smart ", pl.kind, " id=", pl.uniqueId
 
-  writeFile("/tmp/readme_copy.psd", writePsd(doc.file))
-  check readFile("/tmp/readme_copy.psd") == readFile("tests/data/01.psd")
+  writeFile(getTempDir() / "readme_copy.psd", writePsd(doc.file))
+  check readFile(getTempDir() / "readme_copy.psd") == readFile("tests/data/01.psd")

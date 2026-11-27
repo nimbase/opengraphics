@@ -207,48 +207,50 @@ suite "pattern block agreement with the reference implementation":
     # nothing here has been validated against bytes Photoshop wrote, because no
     # fixture has a populated `Patt`.
     if not requireOracle():
-      skip()
-    let oracle = oraclePath()
-    var checked = 0
-    for depth in [8'u16, 16, 32]:
-      for mode in [1'u32, 2, 3, 4, 7, 8, 9]:
-        for withAlpha in [false, true]:
-          for paletted in [false, true]:
-            let blk = writePatternBlock(@[xrefPattern(depth, mode, withAlpha, paletted)])
-            let tmpIn = getTempDir() / ("pat_in_" & $checked & ".bin")
-            let tmpOut = getTempDir() / ("pat_out_" & $checked & ".bin")
-            writeFile(tmpIn, blk)
-            let (_, code) = execCmdEx(oracle & " patterns " & quoteShell(tmpIn) &
-              " " & quoteShell(tmpOut))
-            check code == 0
-            check readFile(tmpOut) == blk
-            removeFile(tmpIn)
-            removeFile(tmpOut)
-            inc checked
-    check checked == 3 * 7 * 2 * 2
+      skip() # reference harness not built; see OG_ORACLE
+    else:
+      let oracle = oraclePath()
+      var checked = 0
+      for depth in [8'u16, 16, 32]:
+        for mode in [1'u32, 2, 3, 4, 7, 8, 9]:
+          for withAlpha in [false, true]:
+            for paletted in [false, true]:
+              let blk = writePatternBlock(@[xrefPattern(depth, mode, withAlpha, paletted)])
+              let tmpIn = getTempDir() / ("pat_in_" & $checked & ".bin")
+              let tmpOut = getTempDir() / ("pat_out_" & $checked & ".bin")
+              writeFile(tmpIn, blk)
+              let (_, code) = execCmdEx(oracle & " patterns " & quoteShell(tmpIn) &
+                " " & quoteShell(tmpOut))
+              check code == 0
+              check readFile(tmpOut) == blk
+              removeFile(tmpIn)
+              removeFile(tmpOut)
+              inc checked
+      check checked == 3 * 7 * 2 * 2
 
   test "several patterns in one block agree too":
     # Order matters: a pattern fills reference its index and id by position, so a
     # block whose patterns come back reordered would resolve fills wrongly even
     # though every individual pattern survived.
     if not requireOracle():
-      skip()
-    let oracle = oraclePath()
-    let ps = @[
-      xrefPattern(8, 3, false, false),
-      xrefPattern(8, 3, true, false),
-      xrefPattern(16, 3, false, false),
-      xrefPattern(32, 4, true, true)]
-    let blk = writePatternBlock(ps)
-    let tmpIn = getTempDir() / "pat_multi_in.bin"
-    let tmpOut = getTempDir() / "pat_multi_out.bin"
-    writeFile(tmpIn, blk)
-    let (outp, code) = execCmdEx(oracle & " patterns " & quoteShell(tmpIn) &
-      " " & quoteShell(tmpOut))
-    check code == 0
-    check readFile(tmpOut) == blk
-    # And the reference saw the same names in the same order.
-    for p in ps:
-      check outp.find(p.name) >= 0
-    removeFile(tmpIn)
-    removeFile(tmpOut)
+      skip() # reference harness not built; see OG_ORACLE
+    else:
+      let oracle = oraclePath()
+      let ps = @[
+        xrefPattern(8, 3, false, false),
+        xrefPattern(8, 3, true, false),
+        xrefPattern(16, 3, false, false),
+        xrefPattern(32, 4, true, true)]
+      let blk = writePatternBlock(ps)
+      let tmpIn = getTempDir() / "pat_multi_in.bin"
+      let tmpOut = getTempDir() / "pat_multi_out.bin"
+      writeFile(tmpIn, blk)
+      let (outp, code) = execCmdEx(oracle & " patterns " & quoteShell(tmpIn) &
+        " " & quoteShell(tmpOut))
+      check code == 0
+      check readFile(tmpOut) == blk
+      # And the reference saw the same names in the same order.
+      for p in ps:
+        check outp.find(p.name) >= 0
+      removeFile(tmpIn)
+      removeFile(tmpOut)
