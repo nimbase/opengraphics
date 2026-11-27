@@ -15,17 +15,31 @@
 > opengraphics unifies popular graphics formats under a single API: one shared pixel model, the same open/read patterns for PSD and AI, plus helpers to convert between formats.
 
 ## Features
-- Initially made for [DatEngine](https://github.com/openpeeps/datengine), a Modular AI Agentic Framework written in Nim lang
 - Read and write Adobe Photoshop `.psd` and `.psb` files
   - All eight colour modes, at 1, 8, 16 and 32 bits
   - Raw, RLE, ZIP and ZIP-prediction pixel data
   - Headers, layers and group trees
   - Layer masks, mask parameters and global masks
   - Vector shapes and solid-color fills
-  - Smart object metadata (transform, bounds, warp)
+  - Adjustment layers: all 16 keys typed (`levl`, `curv`, `hue2`, `brit`,
+    `nvrt`, `thrs`, `post`, `expA`, `vibA`, `blnc`, `mixr`, `grdm`, `phfl`,
+    `selc`, `blwh`, `clrL`); anything unreadable stays raw
+  - Layer effects: `lfx2` master switch + 10 kinds (drop/inner shadow,
+    outer/inner glow, bevel, satin, color/gradient/pattern overlay,
+    stroke), including multi-lists
+  - Type layers: style runs, run lengths, fonts/sizes, tracking/leading,
+    justifications, warp + text-space bounds
+  - Smart objects: `SoLd`/`SoLE`/`PlLd` metadata, embedded/linked files
+    (`lnk2`/`lnk3`/`lnkD`), filter stacks (54 mapped commands, the rest
+    kept raw)
+  - Fill layers: `SoCo`, `GrFl` (angle, stops, opacity stops) and `PtFl`
+    (pattern reference, scale, angle, phase)
+  - Document metadata: guides (1032 + 1092 colors), layer comps (1065),
+    duotone (+1066 alternates), channel names, notes (`Anno`)
+  - Indexed palette mapping and Lab-to-sRGB previews; multichannel falls
+    back to a 3-plane preview instead of refusing to open
   - Layer-stack rendering: all 27 blend modes, per-pixel dissolve,
     group pass-through, opacity, clipping and masks
-  - Text engine data (text, fonts, sizes)
   - Thumbnails, ICC profiles
   - Zero-copy reads: parsed payloads are windows into the caller's buffer or a
     memory mapping, never copies
@@ -163,10 +177,29 @@ written: generated files carry PDF-compatible artwork, not native
 Illustrator edit state.
 
 ## Roadmap
-- Read support for `.eps` and more
-- Writers for the remaining formats (PSD is done)
-- Vector-mask rasterisation, knockout and blending ranges in the compositor
-- Adjustment and effect layers (`lfx2` is parsed structurally, not interpreted)
+Extended version of what is left, grouped by area. The PSD model is
+read-complete for the documented format; what remains is mostly the
+compositor catching up with the model, plus write-side authoring.
+
+### Render from the parsed model
+- Layer effects composited per effect (shadows, glows, overlays, stroke)
+- Adjustment layers applied as live adjustments instead of transparent layers
+- Smart-filter stacks evaluated (params are parsed; `FEid`/`FXid` caches
+  are preserved raw today)
+- Gradient/pattern fills regenerated from descriptors
+- Knockout (`knko` is parsed, not applied) and a bitmap-1 polarity oracle
+  against Photoshop-written bytes
+
+### Write-side authoring
+- Authoring type/shape/smart-object/effect/pattern content (today: verbatim
+  blocks plus generic constructors; unknown descriptor types still abort
+  instead of round-tripping)
+- Heavier composites: isolated groups already cost one full-canvas buffer
+  each; effects/adjustments will add to that
+
+### Formats
+- Read support for `.eps` and more (writers for the remaining formats;
+  PSD write is done)
 - Format-to-format conversion helpers
 - Building blocks for high-level libraries and apps compatible with popular graphics formats
 
