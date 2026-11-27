@@ -559,3 +559,59 @@ test "mixer truncated stays transparent":
   ])
   check renderDocument(doc).getPixel(0, 0) ==
     Rgba(r: 0, g: 0, b: 255, a: 255)
+
+# --- black and white --------------------------------------------------------
+
+proc blwhPayload(weights: array[6, float64], tint: seq[float64] = @[]): seq[byte] =
+  ## `blwh`: versioned descriptor with the six channel weights, `useTint`
+  ## and an optional `tintColor` in RGBC doubles 0..255.
+  var d = newDescriptor("null")
+  const keys = ["Rd  ", "Yllw", "Grn ", "Cyn ", "Bl  ", "Mgnt"]
+  for i, k in keys:
+    discard d.add(k, doubleValue(weights[i]))
+  if tint.len == 3:
+    var t = newDescriptor("RGBC")
+    discard t.add("Rd  ", doubleValue(tint[0]))
+    discard t.add("Grn ", doubleValue(tint[1]))
+    discard t.add("Bl  ", doubleValue(tint[2]))
+    discard d.add("tintColor", descriptorValue(t))
+    discard d.add("useTint", boolValue(true))
+  else:
+    discard d.add("useTint", boolValue(false))
+  var w = initWriter()
+  w.putU32(16)
+  w.writeDescriptorBody(d)
+  let s = w.toString()
+  result = newSeq[byte](s.len)
+  for i, c in s:
+    result[i] = byte(c)
+
+test "blackwhite maps red and yellow to their grays":
+  # Defaults 40/60/40/60/20/80: red -> 40% of 255, yellow -> 60%.
+  let c = blwhPayload([40.0, 60, 40, 60, 20, 80])
+  check renderDocument(docOf(@[solid("red", 255, 0, 0),
+    adjLayer("bw", "blwh", c)])).getPixel(0, 0) ==
+    Rgba(r: 102, g: 102, b: 102, a: 255)
+  check renderDocument(docOf(@[solid("ylw", 255, 255, 0),
+    adjLayer("bw", "blwh", c)])).getPixel(0, 0) ==
+    Rgba(r: 153, g: 153, b: 153, a: 255)
+
+test "blackwhite keeps gray gray":
+  let c = blwhPayload([40.0, 60, 40, 60, 20, 80])
+  check renderDocument(docOf(@[solid("gray", 128, 128, 128),
+    adjLayer("bw", "blwh", c)])).getPixel(0, 0) ==
+    Rgba(r: 128, g: 128, b: 128, a: 255)
+
+test "blackwhite tint takes the tint hue at the gray":
+  let c = blwhPayload([40.0, 60, 40, 60, 20, 80], @[225.0, 211, 179])
+  check renderDocument(docOf(@[solid("gray", 128, 128, 128),
+    adjLayer("bw", "blwh", c)])).getPixel(0, 0) ==
+    Rgba(r: 141, g: 127, b: 95, a: 255)
+
+test "blackwhite truncated stays transparent":
+  let doc = docOf(@[
+    solid("blue", 0, 0, 255),
+    adjLayer("bw", "blwh", @[byte(0), 1]),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 255, a: 255)

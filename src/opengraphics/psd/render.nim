@@ -643,6 +643,28 @@ proc adjustPixel*(adj: Adjustment, r, g, b: int): tuple[r, g, b: int] =
       (x, x, x)
     else:
       (f(r, g, b, 0), f(r, g, b, 1), f(r, g, b, 2))
+  of akBlackWhite:
+    # Weighted gray from the extreme and middle channels, then the tint's
+    # hue and saturation at that gray's luminosity.
+    let w = adj.bwWeights
+    let mx = max(r, max(g, b))
+    let mn = min(r, min(g, b))
+    let md = r + g + b - mx - mn
+    let p = if r >= g and r >= b: 0 elif g >= b: 2 else: 4
+    let s = if b <= r and b <= g: 1 elif r <= g: 3 else: 5
+    let gray = clamp((float64(mn) + float64(md - mn) * float64(w[s]) / 100.0 +
+      float64(mx - md) * float64(w[p]) / 100.0) / 255.0, 0.0, 1.0)
+    if adj.bwTint.isSome:
+      let t = adj.bwTint.get()
+      let tint = Rgba(
+        r: uint8(clamp(int(round(t[0] * 255.0)), 0, 255)),
+        g: uint8(clamp(int(round(t[1] * 255.0)), 0, 255)),
+        b: uint8(clamp(int(round(t[2] * 255.0)), 0, 255)), a: 255)
+      let o = setLum(tint, float32(gray * 255.0))
+      (int(o.r), int(o.g), int(o.b))
+    else:
+      let v = clamp(int(round(gray * 255.0)), 0, 255)
+      (v, v, v)
   else:
     (r, g, b)
 
@@ -652,7 +674,7 @@ proc isSupportedAdjustment*(adj: Adjustment): bool =
   ## transparent until its own commit rather than guessing a formula.
   case adj.kind
   of akInvert, akThreshold, akPosterize, akLevels, akCurves, akExposure,
-     akChannelMixer: true
+     akChannelMixer, akBlackWhite: true
   of akBrightnessContrast: adj.bcLegacy
   else: false
 
