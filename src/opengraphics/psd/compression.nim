@@ -17,7 +17,13 @@
 ## Merged image data is a single zlib stream spanning all planes; prediction
 ## is applied per row across that whole planar buffer.
 
-import zlib/zlib_api
+import std/os
+import std/tempfiles
+
+from archive/io import openInputBorrowed, openInputString, newOutput, take,
+  inputLen, inputPos, readSpan
+from archive/flate import inflateInto, inflateIntoFile, FlateError
+from archive/zlibf import adler32Checksum, adler32Update, zlibCompressInto
 
 import ./error
 import ./header
@@ -306,13 +312,54 @@ proc unpredict*(buf: var string, l: PlaneLayout) =
   else:
     unsupported("prediction for depth " & $l.depth)
 
-# --- zlib -------------------------------------------------------------------
+# --- inflate (pure Nim via archive) -------------------------------------------
+
+const ZipValidateMemCap* = 1 shl 20
+  ## Streams at or below this decoded size validate in memory by reusing
+  ## `zipDecompress`. Larger streams validate through a temp file so a
+  ## hostile payload cannot turn parse-time validation into an
+  ## unbounded allocation; the old zlib loop had the same property via
+  ## a fixed 64 KiB scratch buffer.
+
+proc looksZlib(data: Span): bool =
+  ## The two-byte wrapper probe, unchanged from the zlib days: CM == 8
+  ## (deflate) and the FCHECK mod-31 rule. Deliberately weaker than a
+  ## full header validation so historically accepted streams keep
+  ## decoding the same way.
+  (data.byteAt(0) and 0x0F) == 8 and
+    ((int(data.byteAt(0)) shl 8) + int(data.byteAt(1))) mod 31 == 0
+
+proc checkBound(total, expected: int) =
+  ## The same `expected * 2 + 16` ceiling the zlib loop enforced while
+  ## growing its buffer: Photoshop streams decode to exactly `expected`,
+  ## anything far past that is a decompression bomb.
+  if total > expected * 2 + 16:
+    decompressFailed("ZIP: output exceeds the expected " & $expected &
+      " bytes")
+
+proc verifyAdler(outBuf: string, data: Span, bodyEnd: int) =
+  ## Check the zlib trailer at `bodyEnd`, when present. A stream cut
+  ## inside the deflate body never gets here (inflation fails first);
+  ## a stream cut inside the 4-byte trailer still decodes in full --
+  ## the trailer is a checksum over already-decoded data, so dropping
+  ## it loses no pixels (see the truncation sweep in t_psd_malformed).
+  if data.len - bodyEnd >= 4:
+    var want = 0'u32
+    for i in 0 ..< 4:
+      want = (want shl 8) or uint32(data.byteAt(bodyEnd + i))
+    if adler32Checksum(outBuf) != want:
+      decompressFailed("ZIP: checksum mismatch")
 
 proc zipDecompress*(data: Span, expected: int): string =
   ## Inflate one stream, requiring exactly `expected` output bytes. Tries a
   ## zlib wrapper first and falls back to raw deflate, since a few writers
-  ## emit unwrapped streams. A stream that inflates past `expected` is a
-  ## decompression bomb and is refused rather than buffered.
+  ## emit unwrapped streams. A stream that inflates past `expected * 2 + 16`
+  ## is a decompression bomb and is refused rather than buffered.
+  ##
+  ## Pure Nim (`archive` flate): the output is inflated one-shot and then
+  ## bound-checked, where the old zlib loop refused incrementally. Error
+  ## behavior is identical; only the transient allocation on adversarial
+  ## input differs.
   if expected == 0:
     if data.len == 0:
       return ""
@@ -324,56 +371,83 @@ proc zipDecompress*(data: Span, expected: int): string =
   if data.len < 2:
     decompressFailed("ZIP: " & $data.len & " byte input for " & $expected &
       " expected bytes")
-  let looksZlib = (data.byteAt(0) and 0x0F) == 8 and
-    ((int(data.byteAt(0)) shl 8) + int(data.byteAt(1))) mod 31 == 0
+  let wrapped = looksZlib(data)
 
-  var zs = ZStream(next_in: cast[ptr uint8](data.base),
-    avail_in: data.len.cuint)
-  var windowBits = if looksZlib: Z_DEFAULT_WINDOW_BITS else: Z_RAW_DEFLATE
-  var rc = zs.inflateInit2(windowBits)
-  if rc != Z_OK:
-    decompressFailed("ZIP: inflateInit failed (" & $rc & ")")
-  defer: discard zs.inflateEnd()
+  let inp = openInputBorrowed(data.base, data.len)
+  let dst = newOutput(min(expected, ZipValidateMemCap))
+  if wrapped:
+    discard readSpan(inp, 2)
+  try:
+    inflateInto(inp, dst)
+  except FlateError as e:
+    let partial = take(dst)
+    # The old loop accepted a stream that ended without a marker when the
+    # input was exhausted; keep accepting exact-size results, and turn
+    # short output into a clean failure instead of a downstream crash.
+    if partial.len != expected:
+      decompressFailed("ZIP: inflate failed (" & e.msg & ")")
+    return partial
+  result = take(dst)
+  checkBound(result.len, expected)
+  if wrapped:
+    verifyAdler(result, data, inputPos(inp))
 
-  var cap = max(expected, 64)
-  result = newString(cap)
-  var total = 0
-  var lastIn: culong = 0
-  while true:
-    if total == cap:
-      # bound runaway output: Photoshop streams decode to exactly expected
-      if cap >= expected * 2 + 16:
-        decompressFailed("ZIP: output exceeds the expected " & $expected &
-          " bytes")
-      cap = min(cap * 2, expected * 2 + 16)
-      result.setLen(cap)
-    zs.next_out = cast[ptr uint8](addr result[total])
-    zs.avail_out = cuint(cap - total)
-    rc = zs.inflate(Z_FINISH)
-    total = cap - int(zs.avail_out)
-    if rc == Z_STREAM_END:
-      break
-    if rc == Z_NEED_DICT:
-      decompressFailed("ZIP: preset dictionary not supported")
-    let roomLeft = int(zs.avail_out) > 0
-    if (rc == Z_OK or rc == Z_BUF_ERROR) and
-        (not roomLeft or zs.total_in > lastIn):
-      lastIn = zs.total_in
-      continue
-    if (rc == Z_OK or rc == Z_BUF_ERROR) and zs.avail_in == 0 and roomLeft:
-      break # stream ended without a marker; accept an exact-size result
-    let msg = if zs.msg == nil: $rc else: $zs.msg
-    decompressFailed("ZIP: inflate failed (" & msg & ")")
-  result.setLen(total)
+proc zipValidateStreamToFile(data: Span, expected, bound: int) =
+  ## Large-stream validation with bounded memory: inflate into a temp
+  ## file (fixed 96 KiB scratch inside `archive`), then size-check and
+  ## checksum the bytes back. The temp file is always removed.
+  let (f, path) = createTempFile("opengraphics_zv_", ".bin")
+  try:
+    let inp = openInputBorrowed(data.base, data.len)
+    discard readSpan(inp, 2) # zlib header, already probed by the caller
+    let scratch = newOutput()
+    let (total, _) = inflateIntoFile(inp, f, scratch)
+    if total > bound:
+      decompressFailed("ZIP: output exceeds the expected " & $expected &
+        " bytes")
+    if total != expected:
+      decompressFailed("ZIP: inflated to " & $total & " bytes, expected " &
+        $expected)
+    let bodyEnd = inputPos(inp)
+    if data.len - bodyEnd >= 4:
+      var want = 0'u32
+      for i in 0 ..< 4:
+        want = (want shl 8) or uint32(data.byteAt(bodyEnd + i))
+      flushFile(f)
+      var rf = open(path, fmRead)
+      try:
+        var adler = 1'u32
+        var chunk = newString(64 * 1024)
+        while true:
+          let n = readBuffer(rf, addr chunk[0], chunk.len)
+          if n <= 0:
+            break
+          adler = adler32Update(adler, unsafeAddr chunk[0], n)
+        if adler != want:
+          decompressFailed("ZIP: checksum mismatch")
+      finally:
+        close(rf)
+    # else: trailer cut short -- decodes in full, like zipDecompress.
+  finally:
+    try:
+      close(f)
+    except CatchableError:
+      discard
+    try:
+      removeFile(path)
+    except CatchableError:
+      discard
 
 proc zipValidate*(data: Span, expected: int) =
   ## Prove a stream inflates, without materialising the output.
   ##
   ## Parse-time validation used to call `zipDecompress` and discard the
   ## result, which allocated the entire decoded plane set just to throw it
-  ## away. This inflates into one reusable scratch buffer instead, so
-  ## validating a large composite costs a fixed 64 KiB instead of O(decoded).
-  ## The same `expected * 2 + 16` bound as `zipDecompress` applies.
+  ## away. Small streams still validate that way (reusing `zipDecompress`
+  ## keeps one code path for errors); large streams inflate into a temp
+  ## file instead, so validating a large composite costs a fixed buffer
+  ## instead of O(decoded). The same `expected * 2 + 16` bound as
+  ## `zipDecompress` applies.
   if data.len == 0:
     if expected == 0:
       return
@@ -385,69 +459,41 @@ proc zipValidate*(data: Span, expected: int) =
     decompressFailed("ZIP: " & $data.len & " byte input for " & $expected &
       " expected bytes")
   let bound = expected * 2 + 16
-  let looksZlib = (data.byteAt(0) and 0x0F) == 8 and
-    ((int(data.byteAt(0)) shl 8) + int(data.byteAt(1))) mod 31 == 0
-
-  var zs = ZStream(next_in: cast[ptr uint8](data.base),
-    avail_in: data.len.cuint)
-  var windowBits = if looksZlib: Z_DEFAULT_WINDOW_BITS else: Z_RAW_DEFLATE
-  var rc = zs.inflateInit2(windowBits)
-  if rc != Z_OK:
-    decompressFailed("ZIP: inflateInit failed (" & $rc & ")")
-  defer: discard zs.inflateEnd()
-
-  var scratch = newSeq[byte](64 * 1024)
-  var total = 0
-  var lastIn: culong = 0
-  while true:
-    if total > bound:
-      decompressFailed("ZIP: output exceeds the expected " & $expected &
-        " bytes")
-    zs.next_out = addr scratch[0]
-    zs.avail_out = cuint(scratch.len)
-    rc = zs.inflate(Z_FINISH)
-    total += scratch.len - int(zs.avail_out)
-    if rc == Z_STREAM_END:
-      break
-    if rc == Z_NEED_DICT:
-      decompressFailed("ZIP: preset dictionary not supported")
-    let roomLeft = int(zs.avail_out) > 0
-    if (rc == Z_OK or rc == Z_BUF_ERROR) and
-        (not roomLeft or zs.total_in > lastIn):
-      lastIn = zs.total_in
-      continue
-    if (rc == Z_OK or rc == Z_BUF_ERROR) and zs.avail_in == 0 and roomLeft:
-      break # stream ended without a marker
-    let msg = if zs.msg == nil: $rc else: $zs.msg
-    decompressFailed("ZIP: inflate failed (" & msg & ")")
-  # The point of validating at parse time is to catch a truncated composite
-  # where it lives, so the size actually produced has to be checked. Without
-  # this, a stream cut short still validated as long as it happened to inflate
-  # to the right count before the cut -- the last bytes of a merged image could
-  # be dropped with no error at all.
-  if total != expected:
-    decompressFailed("ZIP: inflated to " & $total & " bytes, expected " &
-      $expected)
+  if expected <= ZipValidateMemCap:
+    let inflated = zipDecompress(data, expected)
+    # The point of validating at parse time is to catch a truncated
+    # composite where it lives, so the size actually produced has to be
+    # checked. Without this, a stream cut short still validated as long
+    # as it happened to inflate to the right count before the cut --
+    # the last bytes of a merged image could be dropped with no error
+    # at all.
+    if inflated.len != expected:
+      decompressFailed("ZIP: inflated to " & $inflated.len &
+        " bytes, expected " & $expected)
+    return
+  if not looksZlib(data):
+    # Large raw streams have no checksum to verify against a file; fall
+    # back to the in-memory path so corrupt input still fails loudly
+    # rather than silently.
+    let inflated = zipDecompress(data, expected)
+    if inflated.len != expected:
+      decompressFailed("ZIP: inflated to " & $inflated.len &
+        " bytes, expected " & $expected)
+    return
+  try:
+    zipValidateStreamToFile(data, expected, bound)
+  except FlateError as e:
+    decompressFailed("ZIP: inflate failed (" & e.msg & ")")
 
 proc zipCompress*(data: string): string =
-  ## zlib-wrapped deflate. Used for writing and for test fixtures.
+  ## zlib-wrapped deflate (level 6, the old `Z_DEFAULT_COMPRESSION`).
+  ## Used for writing and for test fixtures. Pure Nim (`archive`).
   if data.len == 0:
     return ""
-  var zs = ZStream(next_in: cast[ptr uint8](unsafeAddr data[0]),
-    avail_in: data.len.cuint)
-  var rc = zs.deflateInit(Z_DEFAULT_COMPRESSION)
-  if rc != Z_OK:
-    decompressFailed("ZIP: deflateInit failed (" & $rc & ")")
-  defer: discard zs.deflateEnd()
-  let bound = int(zs.deflateBound(data.len.culong)) + 16
-  result = newString(bound)
-  zs.next_out = cast[ptr uint8](addr result[0])
-  zs.avail_out = cuint(bound)
-  rc = zs.deflate(Z_FINISH)
-  let total = bound - int(zs.avail_out)
-  if rc != Z_STREAM_END:
-    decompressFailed("ZIP: deflate failed (" & $rc & ")")
-  result.setLen(total)
+  let inp = openInputString(data)
+  let dst = newOutput(data.len div 2 + 16)
+  zlibCompressInto(inp, dst)
+  take(dst)
 
 # --- plane codecs -----------------------------------------------------------
 

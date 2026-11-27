@@ -320,7 +320,7 @@ proc parseTrailer(data: string): tuple[tab: Table[int, int], root: PdfObj] =
     if data.continuesWith("obj", off) or find(
         data[off ..< min(data.len, off + 300)], "XRef") >= 0:
       aiFail("PDF uses compressed xref streams, which need v2 Flate " &
-        "support (zlib) to read")
+        "support (deflate) to read")
     aiFail("bad xref offset " & $off)
   var p = Parser(s: data, pos: off + 4)
   var tab = initTable[int, int]()

@@ -10,7 +10,7 @@ srcDir        = "src"
 # Dependencies
 
 requires "nim >= 2.2.10"
-requires "zlib >= 0.2.0"
+requires "archive >= 0.1.0"
 requires "nimcypher >= 0.2.3"
 requires "checksums >= 0.2.2"
 requires "harfnim >= 0.1.0"
