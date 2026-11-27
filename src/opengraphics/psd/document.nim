@@ -16,6 +16,7 @@
 ##   full-canvas allocation per document. Use `PsdFile` directly for large
 ##   files.
 
+import std/math
 import std/options
 import std/sequtils
 
@@ -97,11 +98,54 @@ proc colorChannelCount*(f: PsdFile): int =
     invalid("colour mode " & $f.header.colorMode.kind & " has no colour planes")
   n
 
+proc previewChannelCount*(f: PsdFile): int =
+  ## Colour planes for preview. Multichannel/unknown have no defined mapping,
+  ## so preview the first three planes as RGB rather than refusing to open.
+  let n = f.header.colorMode.colorChannelCount()
+  if n > 0: n
+  else: min(f.header.channels, 3)
+
+proc indexedPalette*(f: PsdFile): seq[array[3, uint8]] =
+  ## 256-entry RGB palette for Indexed documents, or empty when absent.
+  if not f.header.colorMode.isIndexed(): return @[]
+  if f.colorModeData.len != 768: return @[]
+  result = newSeq[array[3, uint8]](256)
+  for i in 0 ..< 256:
+    result[i] = [f.colorModeData.byteAt(i * 3),
+      f.colorModeData.byteAt(i * 3 + 1), f.colorModeData.byteAt(i * 3 + 2)]
+
+proc labToRgb*(l, a, b: float64): tuple[r, g, b: uint8] =
+  ## CIE Lab (D50) to sRGB. L 0..100, a/b roughly -128..127.
+  let fy = (l + 16.0) / 116.0
+  let fx = fy + a / 500.0
+  let fz = fy - b / 200.0
+  let f = proc(t: float64): float64 =
+    let t3 = t * t * t
+    if t3 > 0.008856: t3 else: (t - 16.0 / 116.0) / 7.787
+  const Xn = 0.9642
+  const Yn = 1.0
+  const Zn = 0.8249
+  let x = Xn * f(fx)
+  let y = Yn * f(fy)
+  let z = Zn * f(fz)
+  # XYZ D50 -> linear sRGB (Bradford-adapted matrix), then gamma.
+  var rr = 3.1338561 * x - 1.6168667 * y - 0.4906146 * z
+  var gg = -0.9787684 * x + 1.9161415 * y + 0.0334540 * z
+  var bb = 0.0719453 * x - 0.2289914 * y + 1.4052427 * z
+  let gam = proc(v: float64): uint8 =
+    let c = clamp(v, 0.0, 1.0)
+    let s = if c <= 0.0031308: 12.92 * c
+      else: 1.055 * pow(c, 1.0 / 2.4) - 0.055
+    uint8(clamp(s * 255.0 + 0.5, 0.0, 255.0))
+  (gam(rr), gam(gg), gam(bb))
+
 proc planesToImage*(planes: seq[string], width, height, depth: int,
-    colorCount: int): ImageBuf =
+    colorCount: int, mode = ColorMode(kind: cmRgb),
+    palette: seq[array[3, uint8]] = @[]): ImageBuf =
   ## Assemble planes into RGBA. Alpha comes from the plane after the colour
   ## planes when one is present, and defaults to opaque otherwise. Grayscale
-  ## and CMYK are mapped the way Photoshop previews them.
+  ## and CMYK are mapped the way Photoshop previews them; Indexed maps through
+  ## the 768-byte palette; Lab converts via D50 to sRGB.
   result = initImageBuf(width, height, Rgba(r: 0, g: 0, b: 0, a: 0))
   if width <= 0 or height <= 0 or colorCount <= 0:
     return
@@ -116,11 +160,26 @@ proc planesToImage*(planes: seq[string], width, height, depth: int,
   for i in 0 ..< min(colorCount + 1, planes.len):
     u8.add(planeToU8(planes[i], depth, width, height))
   let hasAlpha = u8.len > colorCount
+  let indexed = mode.kind == cmIndexed and palette.len == 256
+  let isLab = mode.kind == cmLab and colorCount == 3
   for i in 0 ..< n:
     var r = 0
     var g = 0
     var b = 0
-    if colorCount == 1:
+    if indexed:
+      let idx = ord(u8[0][i])
+      r = int(palette[idx][0])
+      g = int(palette[idx][1])
+      b = int(palette[idx][2])
+    elif isLab:
+      let l = float64(ord(u8[0][i])) * 100.0 / 255.0
+      let aa = float64(ord(u8[1][i])) - 128.0
+      let bb = float64(ord(u8[2][i])) - 128.0
+      let rgb = labToRgb(l, aa, bb)
+      r = int(rgb.r)
+      g = int(rgb.g)
+      b = int(rgb.b)
+    elif colorCount == 1:
       r = ord(u8[0][i])
       g = r
       b = r
@@ -149,14 +208,15 @@ proc compositeImage*(d: Document): ImageBuf =
 proc decodeCompositeImage*(f: PsdFile): ImageBuf =
   ## Decode the merged image into an `ImageBuf`.
   let (w, h) = (f.width, f.height)
-  let cc = colorChannelCount(f)
+  let cc = previewChannelCount(f)
   let layout = f.mergedLayout()
   let all = decodePlanes(f.imageData.compression, f.imageData.data, layout)
   let planeLen = rowBytesForPlane(w, h, f.header.depth)
   var planes: seq[string] = @[]
   for i in 0 ..< f.header.channels:
     planes.add(all[i * planeLen ..< (i + 1) * planeLen])
-  planesToImage(planes, w, h, f.header.depth, cc)
+  planesToImage(planes, w, h, f.header.depth, cc, f.header.colorMode,
+    indexedPalette(f))
 
 proc layerPlane*(d: Document, index: int, channelId: int16): string =
   ## One channel of one layer as 8-bit samples over the channel's own rect.
@@ -192,7 +252,7 @@ proc layerImage*(d: Document, index: int): LayerImage =
     result.img = initImageBuf(max(w, 0), max(h, 0))
     return
   let n = w * h
-  let cc = colorChannelCount(d.file)
+  let cc = previewChannelCount(d.file)
   # Colour planes, then alpha only when the layer actually carries one. A layer
   # with no -1 channel is fully opaque, not fully transparent.
   var planes: seq[string] = @[]
@@ -200,7 +260,8 @@ proc layerImage*(d: Document, index: int): LayerImage =
     planes.add(d.layerPlane(index, int16(c)))
   if l.channelIndex(ChannelTransparency) >= 0:
     planes.add(d.layerPlane(index, ChannelTransparency))
-  result.img = planesToImage(planes, w, h, d.file.header.depth, cc)
+  result.img = planesToImage(planes, w, h, d.file.header.depth, cc,
+    d.file.header.colorMode, indexedPalette(d.file))
 
 proc layerImage*(l: LayerRecord, f: PsdFile): LayerImage =
   ## Same as the `Document` overload, but for a record already in hand.
