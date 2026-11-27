@@ -739,6 +739,116 @@ proc hueSatLutNim*(tab: openArray[float64], v: float64): float64 =
   tab[i] * (1.0 - f) + tab[i + 1] * f
 
 const
+  BrightnessKnee* = 126.0 / 255.0
+  BrightnessEaseFrom* = 109.5
+
+type
+  BrightRoll* = tuple[s, e, x0, alpha: float64, hermite: bool]
+
+proc brightRollNew(b: float64): BrightRoll =
+  ## The raised curve's line slope and roll-off for one slider magnitude.
+  let s = pow(1.375, b / 50.0)
+  let e = 1.0 / (1.0 + 0.084 * b)
+  let x0 = min(BrightnessKnee / s, 1.0)
+  let secant = (1.0 - BrightnessKnee) / max(1.0 - x0, 1e-6)
+  let alpha = s / secant
+  let beta = e / secant
+  (s: s, e: e, x0: x0, alpha: alpha,
+    hermite: alpha * alpha + beta * beta <= 9.0)
+
+proc brightRollEval(r: BrightRoll, x: float64): float64 =
+  ## The line, then a monotone roll-off to (1, 1).
+  if x <= r.x0:
+    return min(BrightnessKnee, r.s * x)
+  let h = max(1.0 - r.x0, 1e-6)
+  let t = clamp((x - r.x0) / h, 0.0, 1.0)
+  let (t2, t3) = (t * t, t * t * t)
+  let y =
+    if r.hermite:
+      (2.0 * t3 - 3.0 * t2 + 1.0) * BrightnessKnee +
+        (t3 - 2.0 * t2 + t) * h * r.s + (-2.0 * t3 + 3.0 * t2) +
+        (t3 - t2) * h * r.e
+    else:
+      1.0 - (1.0 - BrightnessKnee) * pow(1.0 - t, r.alpha)
+  clamp(y, 0.0, 1.0)
+
+proc brightness150Nim(x: float64): float64 =
+  ## The modern Brightness curve at +150: line, Hermite, exponential tail.
+  const S = 2.585
+  const C = 0.131
+  const D = 0.4 / 255.0
+  const X1 = 52.0 / 255.0
+  const X2 = 168.0 / 255.0
+  let tail = 1.0 - D * (exp((1.0 - x) / C) - 1.0)
+  let xc = clamp(x, 0.0, 1.0)
+  if xc <= X1:
+    return S * xc
+  if xc >= X2:
+    return min(tail, 1.0)
+  let y1 = S * X1
+  let y2 = 1.0 - D * (exp((1.0 - X2) / C) - 1.0)
+  let m2 = D / C * exp((1.0 - X2) / C)
+  let h = X2 - X1
+  let t = (xc - X1) / h
+  let (t2, t3) = (t * t, t * t * t)
+  (2.0 * t3 - 3.0 * t2 + 1.0) * y1 + (t3 - 2.0 * t2 + t) * h * S +
+    (-2.0 * t3 + 3.0 * t2) * y2 + (t3 - t2) * h * m2
+
+proc modernBrightnessNim*(v, b: float64): float64 =
+  ## Modern Brightness: raised curve, easing into the +150 shape past 109.5;
+  ## lowering inverts the raised curve by bisection.
+  if b == 0.0 or b != b or b == Inf or b == NegInf:
+    return v
+  let vv = clamp(v, 0.0, 1.0)
+  let mag = abs(b)
+  let roll = brightRollNew(mag)
+  let toward150 = clamp((mag - BrightnessEaseFrom) / (150.0 - BrightnessEaseFrom),
+    0.0, 1.0)
+  proc raised(x: float64): float64 =
+    let y = brightRollEval(roll, x)
+    if toward150 <= 0.0:
+      return y
+    let target = brightness150Nim(x)
+    let held = min(y, target)
+    clamp(held + toward150 * (target - held), 0.0, 1.0)
+  if b > 0.0:
+    return raised(vv)
+  if vv <= 0.0 or vv >= 1.0:
+    return vv
+  var lo = 0.0
+  var hi = 1.0
+  for _ in 0 ..< 32:
+    let mid = 0.5 * (lo + hi)
+    if raised(mid) < vv:
+      lo = mid
+    else:
+      hi = mid
+  0.5 * (lo + hi)
+
+proc modernContrastNim*(v, c: float64): float64 =
+  ## Modern Contrast: cubic Hermite pinned at black, middle gray and white.
+  let vv = clamp(v, 0.0, 1.0)
+  if c == 0.0:
+    return vv
+  let k = c / 128.0
+  let (en, mid) = (1.0 - k, 1.0 + k)
+  proc half(t: float64): float64 =
+    en * 0.5 * (t * t * t - 2.0 * t * t + t) +
+      (-2.0 * t * t * t + 3.0 * t * t) * 0.5 +
+      mid * 0.5 * (t * t * t - t * t)
+  if vv <= 0.5: half(vv / 0.5)
+  else: 1.0 - half((1.0 - vv) / 0.5)
+
+proc modernLutNim*(brightness, contrast: float64): seq[float64] =
+  ## Brightness then contrast over 4096 samples, as Photoshop applies them.
+  const N = 4096
+  result = newSeq[float64](N)
+  for k in 0 ..< N:
+    let x = float64(k) / float64(N - 1)
+    result[k] = modernContrastNim(modernBrightnessNim(x, brightness),
+      contrast)
+
+const
   VibranceBoost* = [0.5001, 0.0887, 0.4374, 0.7573, -0.8113, 0.5154, 2.8026]
   VibranceGrey* = [0.288, 0.712]
 
@@ -888,6 +998,9 @@ proc curvesTablesFor*(adj: Adjustment): CurvesTables =
 proc adjustPixel*(adj: Adjustment, r, g, b: int): tuple[r, g, b: int] =
   ## One 8-bit RGB pixel through a supported adjustment. Callers check
   ## `isSupportedAdjustment` first; unsupported kinds return the pixel.
+  ## Curves, photo filter, gradient map, color balance, hue/saturation and
+  ## modern brightness/contrast need per-layer tables and run in
+  ## `applyAdjustmentLayer` instead.
   case adj.kind
   of akInvert:
     (255 - r, 255 - g, 255 - b)
@@ -1028,14 +1141,13 @@ proc adjustPixel*(adj: Adjustment, r, g, b: int): tuple[r, g, b: int] =
     (r, g, b)
 
 proc isSupportedAdjustment*(adj: Adjustment): bool =
-  ## Kinds `applyAdjustmentLayer` evaluates. Everything else (hue/saturation,
-  ## vibrance, modern brightness/contrast, color balance, ...) stays
-  ## transparent until its own commit rather than guessing a formula.
+  ## Kinds `applyAdjustmentLayer` evaluates. Color lookup stays transparent:
+  ## its profile payload carries no usable table data.
   case adj.kind
   of akInvert, akThreshold, akPosterize, akLevels, akCurves, akExposure,
      akChannelMixer, akBlackWhite, akPhotoFilter, akGradientMap,
-     akColorBalance, akSelectiveColor, akHueSaturation, akVibrance: true
-  of akBrightnessContrast: adj.bcLegacy
+     akColorBalance, akSelectiveColor, akHueSaturation, akVibrance,
+     akBrightnessContrast: true
   else: false
 
 proc compositeOver(dst: var Rgba, src: Rgba, mode: BlendMode, opacity,
@@ -1252,6 +1364,10 @@ proc applyAdjustmentLayer*(doc: Document, index: int, canvas: var ImageBuf,
   let isHueSat = adj.kind == akHueSaturation
   let hueT = if isHueSat: hueSatTablesFor(adj)
     else: default(HueSatTables)
+  let isModernBc = adj.kind == akBrightnessContrast and not adj.bcLegacy
+  var modernT: seq[float64] = @[]
+  if isModernBc:
+    modernT = modernLutNim(float64(adj.brightness), float64(adj.contrast))
   let dissolve = mode == bmDissolve
   let mask = if layer.layerMask().isSome or layer.hasVectorMask:
                initMaskSampler(doc, index)
@@ -1328,6 +1444,11 @@ proc applyAdjustmentLayer*(doc: Document, index: int, canvas: var ImageBuf,
           (clamp(int(round(o[0] * 255.0)), 0, 255),
             clamp(int(round(o[1] * 255.0)), 0, 255),
             clamp(int(round(o[2] * 255.0)), 0, 255))
+        elif isModernBc:
+          # Same interpolation the reference LUT path uses at whole levels.
+          (clamp(int(round(hueSatLutNim(modernT, float64(dp.r) / 255.0) * 255.0)), 0, 255),
+            clamp(int(round(hueSatLutNim(modernT, float64(dp.g) / 255.0) * 255.0)), 0, 255),
+            clamp(int(round(hueSatLutNim(modernT, float64(dp.b) / 255.0) * 255.0)), 0, 255))
         else:
           adjustPixel(adj, int(dp.r), int(dp.g), int(dp.b))
       var src = Rgba(r: uint8(ar), g: uint8(ag), b: uint8(ab), a: 255)

@@ -1000,3 +1000,66 @@ test "vibrance truncated stays transparent":
   ])
   check renderDocument(doc).getPixel(0, 0) ==
     Rgba(r: 0, g: 0, b: 255, a: 255)
+
+# --- modern brightness/contrast -----------------------------------------------
+
+proc cgedPayload(b, c: int32, legacy: bool): seq[byte] =
+  ## `CgEd`: versioned descriptor carrying the dialog sliders.
+  var d = newDescriptor("null")
+  discard d.add("Brgh", intValue(b))
+  discard d.add("Cntr", intValue(c))
+  discard d.add("useLegacy", boolValue(legacy))
+  var w = initWriter()
+  w.putU32(16)
+  w.writeDescriptorBody(d)
+  let s = w.toString()
+  result = newSeq[byte](s.len)
+  for i, ch in s:
+    result[i] = byte(ch)
+
+proc bcLayer(name: string, b, c: int16, cged: seq[byte]): TestLayerSpec =
+  TestLayerSpec(name: name, top: 0, left: 0, bottom: 2, right: 2,
+    planes: @[], channelIds: @[], useRle: false, blendKey: "norm",
+    opacity: 255, clipping: 0, flags: 0, lsct: -1, lsdk: -1,
+    extra: @[("brit", @(adjBytesI16(b) & adjBytesI16(c))), ("CgEd", cged)])
+
+test "modern brightness lifts the ramp like Photoshop":
+  # Oracles: +50 maps 64 to 88 and 128 to 171; -50 maps them to 47 and 93.
+  let up = cgedPayload(50, 0, false)
+  check renderDocument(docOf(@[solid("lo", 64, 64, 64),
+    bcLayer("bc", 0, 0, up)])).getPixel(0, 0) ==
+    Rgba(r: 88, g: 88, b: 88, a: 255)
+  check renderDocument(docOf(@[solid("mid", 128, 128, 128),
+    bcLayer("bc", 0, 0, up)])).getPixel(0, 0) ==
+    Rgba(r: 171, g: 171, b: 171, a: 255)
+  let dn = cgedPayload(-50, 0, false)
+  check renderDocument(docOf(@[solid("lo", 64, 64, 64),
+    bcLayer("bc", 0, 0, dn)])).getPixel(0, 0) ==
+    Rgba(r: 47, g: 47, b: 47, a: 255)
+  check renderDocument(docOf(@[solid("mid", 128, 128, 128),
+    bcLayer("bc", 0, 0, dn)])).getPixel(0, 0) ==
+    Rgba(r: 93, g: 93, b: 93, a: 255)
+
+test "modern contrast pivots at middle gray":
+  # Oracles: +50 maps 32 to 23, 64 to 52, holds 128; -50 maps 64 to 76
+  # and 192 to 180.
+  let up = cgedPayload(0, 50, false)
+  check renderDocument(docOf(@[solid("lo", 32, 32, 32),
+    bcLayer("bc", 0, 0, up)])).getPixel(0, 0) ==
+    Rgba(r: 23, g: 23, b: 23, a: 255)
+  check renderDocument(docOf(@[solid("mid", 128, 128, 128),
+    bcLayer("bc", 0, 0, up)])).getPixel(0, 0) ==
+    Rgba(r: 128, g: 128, b: 128, a: 255)
+  let dn = cgedPayload(0, -50, false)
+  check renderDocument(docOf(@[solid("lo", 64, 64, 64),
+    bcLayer("bc", 0, 0, dn)])).getPixel(0, 0) ==
+    Rgba(r: 76, g: 76, b: 76, a: 255)
+  check renderDocument(docOf(@[solid("hi", 192, 192, 192),
+    bcLayer("bc", 0, 0, dn)])).getPixel(0, 0) ==
+    Rgba(r: 180, g: 180, b: 180, a: 255)
+
+test "modern zeros leave the backdrop alone":
+  let c = cgedPayload(0, 0, false)
+  check renderDocument(docOf(@[solid("red", 255, 0, 0),
+    bcLayer("bc", 0, 0, c)])).getPixel(0, 0) ==
+    Rgba(r: 255, g: 0, b: 0, a: 255)
