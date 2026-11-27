@@ -622,6 +622,34 @@ proc photoPixel*(m: array[3, array[3, float64]], preserve: bool,
     clamp(int(round(e[1] * 255.0)), 0, 255),
     clamp(int(round(e[2] * 255.0)), 0, 255))
 
+type
+  GradientStop* = tuple[pos: float64, rgb: array[3, float64]]
+
+const
+  Bayer4 = [0.0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5]
+
+proc bayer4Nim(x, y: int): float64 =
+  ## Centered 4x4 Bayer offset, so dither adds no overall bias.
+  (Bayer4[(y and 3) * 4 + (x and 3)] + 0.5) / 16.0 - 0.5
+
+proc gradientSampleNim(stops: openArray[GradientStop],
+    t: float64): array[3, float64] =
+  ## Linear interpolation between stops, clamped outside the ends.
+  if stops.len == 0:
+    return [t, t, t]
+  if stops.len == 1 or t <= stops[0].pos:
+    return stops[0].rgb
+  for i in 0 ..< stops.len - 1:
+    if t <= stops[i + 1].pos:
+      let k = if stops[i + 1].pos > stops[i].pos:
+        (t - stops[i].pos) / (stops[i + 1].pos - stops[i].pos)
+      else: 0.0
+      let a = stops[i].rgb
+      let b = stops[i + 1].rgb
+      return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k,
+        a[2] + (b[2] - a[2]) * k]
+  stops[^1].rgb
+
 proc curvesTablesFor*(adj: Adjustment): CurvesTables =
   ## 8-bit RGB Curves tables: each channel snapped to a whole level, then the
   ## master at that level, as Photoshop does.
@@ -729,7 +757,7 @@ proc isSupportedAdjustment*(adj: Adjustment): bool =
   ## transparent until its own commit rather than guessing a formula.
   case adj.kind
   of akInvert, akThreshold, akPosterize, akLevels, akCurves, akExposure,
-     akChannelMixer, akBlackWhite, akPhotoFilter: true
+     akChannelMixer, akBlackWhite, akPhotoFilter, akGradientMap: true
   of akBrightnessContrast: adj.bcLegacy
   else: false
 
@@ -929,6 +957,15 @@ proc applyAdjustmentLayer*(doc: Document, index: int, canvas: var ImageBuf,
   var photoM: array[3, array[3, float64]]
   if isPhoto:
     photoM = photoMatrixFor(adj)
+  let isGradient = adj.kind == akGradientMap
+  var gradStops: seq[GradientStop] = @[]
+  if isGradient:
+    # Photoshop writes stops sorted; normalize file order so sampling is a
+    # plain segment walk, like the reference model.
+    for s in adj.gradStops:
+      gradStops.add((float64(s.pos),
+        [float64(s.rgb[0]), float64(s.rgb[1]), float64(s.rgb[2])]))
+    gradStops.sort(proc(a, b: GradientStop): int = cmp(a.pos, b.pos))
   let dissolve = mode == bmDissolve
   let mask = if layer.layerMask().isSome or layer.hasVectorMask:
                initMaskSampler(doc, index)
@@ -967,6 +1004,18 @@ proc applyAdjustmentLayer*(doc: Document, index: int, canvas: var ImageBuf,
            curvesT.master[curvesT.ch[2][int(dp.b)]])
         elif isPhoto:
           photoPixel(photoM, adj.pfPreserve, int(dp.r), int(dp.g), int(dp.b))
+        elif isGradient:
+          var t = (0.3 * float64(dp.r) + 0.59 * float64(dp.g) +
+            0.11 * float64(dp.b)) / 255.0
+          if adj.gradReverse:
+            t = 1.0 - t
+          var o = gradientSampleNim(gradStops, t)
+          if adj.gradDither:
+            let d = bayer4Nim(x, y) / 255.0
+            o = [o[0] + d, o[1] + d, o[2] + d]
+          (clamp(int(round(o[0] * 255.0)), 0, 255),
+            clamp(int(round(o[1] * 255.0)), 0, 255),
+            clamp(int(round(o[2] * 255.0)), 0, 255))
         else:
           adjustPixel(adj, int(dp.r), int(dp.g), int(dp.b))
       var src = Rgba(r: uint8(ar), g: uint8(ag), b: uint8(ab), a: 255)

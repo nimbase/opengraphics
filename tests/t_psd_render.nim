@@ -1,3 +1,4 @@
+import std/math
 import unittest
 import ../src/opengraphics/psd
 import ./psd_support
@@ -669,6 +670,80 @@ test "photofilter truncated stays transparent":
   let doc = docOf(@[
     solid("blue", 0, 0, 255),
     adjLayer("pf", "phfl", @[byte(0), 1]),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 255, a: 255)
+
+# --- gradient map -----------------------------------------------------------
+
+proc grdmPayload(rev, dither: bool,
+    stops: seq[tuple[pos: float64, rgb: array[3, int]]]): seq[byte] =
+  ## `grdm` v1: rev/dither flags, empty name, then stops as u32 location
+  ## (pos * 4096), 4 reserved bytes, RGB space, 4x u16 comps, 2 pad bytes.
+  result = adjBytesU16(1)
+  result.add(if rev: byte(1) else: byte(0))
+  result.add(if dither: byte(1) else: byte(0))
+  result.add(@[byte(0), 0, 0, 0]) # empty name
+  result.add(adjBytesU16(uint16(stops.len)))
+  for s in stops:
+    let loc = uint32(round(s.pos * 4096.0))
+    result.add(@[byte(loc shr 24), byte((loc shr 16) and 0xFF),
+      byte((loc shr 8) and 0xFF), byte(loc and 0xFF)])
+    result.add(@[byte(0), 0, 0, 0])
+    result.add(adjBytesU16(0))
+    for v in [s.rgb[0], s.rgb[1], s.rgb[2], 0]:
+      result.add(adjBytesU16(u16comp(v)))
+    result.add(@[byte(0), 0])
+
+test "gradientmap black-white follows luminosity":
+  # Red sits at exactly 76.5: Rust/Nim round half away from zero, so 77.
+  let c = grdmPayload(false, false, @[(0.0, [0, 0, 0]), (1.0, [255, 255, 255])])
+  check renderDocument(docOf(@[solid("gray", 128, 128, 128),
+    adjLayer("gm", "grdm", c)])).getPixel(0, 0) ==
+    Rgba(r: 128, g: 128, b: 128, a: 255)
+  check renderDocument(docOf(@[solid("red", 255, 0, 0),
+    adjLayer("gm", "grdm", c)])).getPixel(0, 0) ==
+    Rgba(r: 77, g: 77, b: 77, a: 255)
+
+test "gradientmap reverse flips the ramp":
+  let c = grdmPayload(true, false, @[(0.0, [0, 0, 0]), (1.0, [255, 255, 255])])
+  check renderDocument(docOf(@[solid("gray", 128, 128, 128),
+    adjLayer("gm", "grdm", c)])).getPixel(0, 0) ==
+    Rgba(r: 127, g: 127, b: 127, a: 255)
+
+test "gradientmap white-black inverts by luminosity":
+  let c = grdmPayload(false, false, @[(0.0, [255, 255, 255]), (1.0, [0, 0, 0])])
+  check renderDocument(docOf(@[solid("blu", 0, 0, 255),
+    adjLayer("gm", "grdm", c)])).getPixel(0, 0) ==
+    Rgba(r: 227, g: 227, b: 227, a: 255)
+
+test "gradientmap dither splits a half level across pixels":
+  # Red sits at exactly 76.5, so dither-off rounds to 77 everywhere, while
+  # dither-on drops the (0,0) Bayer cell to 76 and keeps (1,0) at 77.
+  let plain = grdmPayload(false, false, @[(0.0, [0, 0, 0]), (1.0, [255, 255, 255])])
+  let plainImg = renderDocument(docOf(@[solid("red", 255, 0, 0),
+    adjLayer("gm", "grdm", plain)]))
+  check plainImg.getPixel(0, 0) == Rgba(r: 77, g: 77, b: 77, a: 255)
+  check plainImg.getPixel(1, 0) == Rgba(r: 77, g: 77, b: 77, a: 255)
+  let dith = grdmPayload(false, true, @[(0.0, [0, 0, 0]), (1.0, [255, 255, 255])])
+  let img = renderDocument(docOf(@[solid("red", 255, 0, 0),
+    adjLayer("gm", "grdm", dith)]))
+  check img.getPixel(0, 0) == Rgba(r: 76, g: 76, b: 76, a: 255)
+  check img.getPixel(1, 0) == Rgba(r: 77, g: 77, b: 77, a: 255)
+
+test "gradientmap file order does not matter":
+  let c = grdmPayload(false, false, @[(1.0, [255, 255, 255]), (0.0, [0, 0, 0])])
+  check renderDocument(docOf(@[solid("gray", 128, 128, 128),
+    adjLayer("gm", "grdm", c)])).getPixel(0, 0) ==
+    Rgba(r: 128, g: 128, b: 128, a: 255)
+
+test "gradientmap bad version stays transparent":
+  var c = grdmPayload(false, false, @[(0.0, [0, 0, 0]), (1.0, [255, 255, 255])])
+  c[0] = 0
+  c[1] = 2 # version 2
+  let doc = docOf(@[
+    solid("blue", 0, 0, 255),
+    adjLayer("gm", "grdm", c),
   ])
   check renderDocument(doc).getPixel(0, 0) ==
     Rgba(r: 0, g: 0, b: 255, a: 255)
