@@ -210,13 +210,20 @@ proc duotoneOf*(f: PsdFile): Option[Duotone] =
   try: some(parseDuotone(f.colorModeData))
   except PsdError: none(Duotone)
 
-proc alternateDuotoneColors*(resources: openArray[ImageResource]): seq[array[3, uint16]] =
-  ## Resource 1066: alternate Lab colors for book inks, in ink order.
-  ## Each is 10B (space + 4 comps like duotone inks); only Lab entries are
-  ## returned with their three channels, others as zeros.
-  let res = getResource(resources, 1066)
-  if res.isNone or res.get().data.len < 4: return @[]
-  var r = initReader(res.get().data)
+type
+  AlternateColor* = tuple[space: uint16, c: array[4, uint16]]
+    ## One 1066 entry: space plus raw comps, Lab decoded as L=u16/100,
+    ## a/b=i16/100.
+
+  DuotoneDisplayInk* = object
+    rgb*: array[3, float64] ## 0..1 display color
+    curve*: seq[tuple[at, v: float64]] ## ink density over gray density
+
+proc parseAlternateColors*(data: Span): seq[AlternateColor] =
+  ## Resource 1066 payload: version 1, a count, then one 10-byte color
+  ## (space + 4 comps) per ink in ink order.
+  if data.len < 4: return @[]
+  var r = initReader(data)
   try:
     if r.readU16BE() != 1: return @[]
     let n = int(r.readU16BE())
@@ -225,12 +232,57 @@ proc alternateDuotoneColors*(resources: openArray[ImageResource]): seq[array[3, 
       let space = r.readU16BE()
       var c: array[4, uint16]
       for k in 0 ..< 4: c[k] = r.readU16BE()
-      if space == 7: # Lab
-        result.add([c[0], c[1], c[2]])
-      else:
-        result.add([0'u16, 0, 0])
+      result.add((space, c))
   except PsdError:
     discard
+
+proc alternateColorsOf*(resources: openArray[ImageResource]): seq[AlternateColor] =
+  let res = getResource(resources, 1066)
+  if res.isNone: return @[]
+  parseAlternateColors(res.get().data)
+
+proc alternateDuotoneColors*(resources: openArray[ImageResource]): seq[array[3, uint16]] =
+  ## Resource 1066: alternate Lab colors for book inks, in ink order.
+  ## Only Lab entries are returned with their three channels, others as
+  ## zeros. See `parseAlternateColors` for the raw form.
+  for e in alternateColorsOf(resources):
+    if e.space == 7: # Lab
+      result.add([e.c[0], e.c[1], e.c[2]])
+    else:
+      result.add([0'u16, 0, 0])
+
+proc duotoneDensity*(curve: openArray[tuple[at, v: float64]],
+    x: float64): float64 =
+  ## Ink density for a gray density through the ink's transfer curve:
+  ## piecewise linear, constant outside the ends.
+  var y = clamp(x, 0.0, 1.0)
+  if curve.len == 0:
+    discard
+  elif curve.len == 1:
+    y = curve[0].v
+  elif x <= curve[0].at:
+    y = curve[0].v
+  elif x >= curve[^1].at:
+    y = curve[^1].v
+  else:
+    for i in 0 ..< curve.len - 1:
+      if x <= curve[i + 1].at:
+        let span = max(curve[i + 1].at - curve[i].at, 1e-6)
+        y = curve[i].v + (curve[i + 1].v - curve[i].v) *
+          (x - curve[i].at) / span
+        break
+  clamp(y, 0.0, 1.0)
+
+proc duotoneRenderRaw*(inks: openArray[DuotoneDisplayInk],
+    gray: float64): array[3, float64] =
+  ## Simulated print color of a gray value (0 black, 1 white): inks multiply
+  ## over white paper, each filtering light by its density.
+  let density = 1.0 - clamp(gray, 0.0, 1.0)
+  result = [1.0, 1.0, 1.0]
+  for ink in inks:
+    let d = duotoneDensity(ink.curve, density)
+    for k in 0 ..< 3:
+      result[k] *= 1.0 - d * (1.0 - ink.rgb[k])
 
 type
   ChannelMeta* = object

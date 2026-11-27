@@ -355,9 +355,10 @@ proc parseChannelMixer(data: Span): Option[tuple[m: array[3, array[4, float32]],
       m[rr][k] = (float32(v.get()).clamp(-200.0f32, 200.0f32)) / 100.0f32
   some((m, mon.get() != 0))
 
-proc decodeKnownColor(space: uint16, c: array[4, uint16]): Option[array[3, float32]] =
-  ## Minimal color decode for gradient stops: RGB (0) and gray. Others return
-  ## none so the gradient stays unsupported rather than wrong.
+proc decodeKnownColor*(space: uint16, c: array[4, uint16]): Option[array[3, float32]] =
+  ## Minimal color decode for gradient stops and duotone inks: RGB (0), HSB
+  ## (1) and naive CMYK (2). Others return none so the caller falls back
+  ## rather than guessing a conversion.
   case space
   of 0: # RGB
     some([float32(c[0]) / 65535.0f32, float32(c[1]) / 65535.0f32,

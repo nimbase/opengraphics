@@ -21,6 +21,7 @@ import std/options
 import std/sequtils
 
 import ./compression
+import ./adjustments
 import ./docmeta
 import ./error
 import ./file
@@ -143,7 +144,8 @@ proc labToRgb*(l, a, b: float64): tuple[r, g, b: uint8] =
 
 proc planesToImage*(planes: seq[string], width, height, depth: int,
     colorCount: int, mode = ColorMode(kind: cmRgb),
-    palette: seq[array[3, uint8]] = @[]): ImageBuf =
+    palette: seq[array[3, uint8]] = @[],
+    duo: seq[DuotoneDisplayInk] = @[]): ImageBuf =
   ## Assemble planes into RGBA. Alpha comes from the plane after the colour
   ## planes when one is present, and defaults to opaque otherwise. Grayscale
   ## and CMYK are mapped the way Photoshop previews them; Indexed maps through
@@ -182,9 +184,15 @@ proc planesToImage*(planes: seq[string], width, height, depth: int,
       g = int(rgb.g)
       b = int(rgb.b)
     elif colorCount == 1:
-      r = ord(u8[0][i])
-      g = r
-      b = r
+      if mode.kind == cmDuotone and duo.len > 0:
+        let o = duotoneRenderRaw(duo, float64(ord(u8[0][i])) / 255.0)
+        r = clamp(int(round(o[0] * 255.0)), 0, 255)
+        g = clamp(int(round(o[1] * 255.0)), 0, 255)
+        b = clamp(int(round(o[2] * 255.0)), 0, 255)
+      else:
+        r = ord(u8[0][i])
+        g = r
+        b = r
     elif colorCount == 4:
       # CMYK stored inverted; the preview is the naive subtractive mix.
       let c = 255 - ord(u8[0][i])
@@ -200,6 +208,47 @@ proc planesToImage*(planes: seq[string], width, height, depth: int,
       b = ord(u8[2][i])
     let a = if hasAlpha: ord(u8[colorCount][i]) else: 255
     result.data[i] = Rgba(r: uint8(r), g: uint8(g), b: uint8(b), a: uint8(a))
+
+proc duotoneDisplayInks*(f: PsdFile): seq[DuotoneDisplayInk] =
+  ## Display inks for a duotone document: each ink's color from its own
+  ## block, falling back to the 1066 Lab alternate for book inks. Empty when
+  ## any ink lacks a usable color, in which case the preview stays a gray
+  ## plate, and when the document is not duotone.
+  if f.header.colorMode.kind != cmDuotone: return @[]
+  let d = duotoneOf(f)
+  if d.isNone or d.get().inks.len == 0: return @[]
+  let alts = alternateColorsOf(f.resources)
+  for i, ink in d.get().inks:
+    var done = false
+    case ink.space
+    of 0, 1, 2:
+      let dc = decodeKnownColor(ink.space, ink.comps)
+      if dc.isSome:
+        let c = dc.get()
+        result.add(DuotoneDisplayInk(rgb: [float64(c[0]),
+          float64(c[1]), float64(c[2])], curve: ink.curve))
+        done = true
+    of 7:
+      let (rr, gg, bb) = labToRgb(float64(min(ink.comps[0], 10000)) / 100.0,
+        float64(cast[int16](ink.comps[1])) / 100.0,
+        float64(cast[int16](ink.comps[2])) / 100.0)
+      result.add(DuotoneDisplayInk(rgb: [float64(rr) / 255.0,
+        float64(gg) / 255.0, float64(bb) / 255.0], curve: ink.curve))
+      done = true
+    of 8:
+      let v = 1.0 - float64(min(ink.comps[0], 10000)) / 10000.0
+      result.add(DuotoneDisplayInk(rgb: [v, v, v], curve: ink.curve))
+      done = true
+    else: discard
+    if not done and i < alts.len and alts[i].space == 7:
+      let a = alts[i].c
+      let (rr, gg, bb) = labToRgb(float64(min(a[0], 10000)) / 100.0,
+        float64(cast[int16](a[1])) / 100.0,
+        float64(cast[int16](a[2])) / 100.0)
+      result.add(DuotoneDisplayInk(rgb: [float64(rr) / 255.0,
+        float64(gg) / 255.0, float64(bb) / 255.0], curve: ink.curve))
+      done = true
+    if not done: return @[]
 
 proc compositeImage*(d: Document): ImageBuf =
   ## The stored flattened image. Empty when the file has none or when
@@ -217,8 +266,10 @@ proc decodeCompositeImage*(f: PsdFile): ImageBuf =
   var planes: seq[string] = @[]
   for i in 0 ..< f.header.channels:
     planes.add(all[i * planeLen ..< (i + 1) * planeLen])
+  let duo = if f.header.colorMode.kind == cmDuotone: duotoneDisplayInks(f)
+    else: @[]
   planesToImage(planes, w, h, f.header.depth, cc, f.header.colorMode,
-    indexedPalette(f))
+    indexedPalette(f), duo)
 
 proc layerPlane*(d: Document, index: int, channelId: int16): string =
   ## One channel of one layer as 8-bit samples over the channel's own rect.
@@ -262,8 +313,10 @@ proc layerImage*(d: Document, index: int): LayerImage =
     planes.add(d.layerPlane(index, int16(c)))
   if l.channelIndex(ChannelTransparency) >= 0:
     planes.add(d.layerPlane(index, ChannelTransparency))
+  let duo = if d.file.header.colorMode.kind == cmDuotone:
+    duotoneDisplayInks(d.file) else: @[]
   result.img = planesToImage(planes, w, h, d.file.header.depth, cc,
-    d.file.header.colorMode, indexedPalette(d.file))
+    d.file.header.colorMode, indexedPalette(d.file), duo)
 
 proc layerImage*(l: LayerRecord, f: PsdFile): LayerImage =
   ## Same as the `Document` overload, but for a record already in hand.
