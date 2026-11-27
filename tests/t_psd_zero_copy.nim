@@ -18,6 +18,7 @@
 import std/os
 import std/options
 import std/sequtils
+import std/strutils
 import posix
 import unittest
 
@@ -44,6 +45,34 @@ proc peakRss(): int64 =
       result = int64(ru.ru_maxrss)
   else:
     result = -1
+
+proc minFlt(): int64 =
+  ## Minor page faults so far (file pages first-touched per mapping plus
+  ## fresh anonymous pages). Tells page-touching apart from heap growth.
+  var ru: Rusage
+  if getrusage(RUSAGE_SELF, addr ru) == 0:
+    result = int64(ru.ru_minflt)
+  else:
+    result = -1
+
+when defined(linux):
+  proc vmStat(): tuple[rss, hwm, data: int64] =
+    ## Current RSS, peak RSS and heap size from /proc, all in bytes.
+    ## Peak (HWM) can only confirm; current RSS and heap size say whether
+    ## growth is retained anonymous memory or mapping accounting.
+    result = (0'i64, 0, 0)
+    for line in lines("/proc/self/status"):
+      let parts = line.splitWhitespace()
+      if parts.len < 2:
+        continue
+      let kb =
+        try: parseInt(parts[1]).int64
+        except ValueError: continue
+      case parts[0]
+      of "VmRSS:": result.rss = kb * 1024
+      of "VmHWM:": result.hwm = kb * 1024
+      of "VmData:": result.data = kb * 1024
+      else: discard
 
 proc inside(s: Span, src: Source): bool =
   ## True when `s`'s bytes are inside `src`'s own buffer rather than a copy.
@@ -154,15 +183,29 @@ suite "zero-copy: every payload is a window into the file":
 
 suite "zero-copy: peak memory does not scale with file size":
   test "re-parsing the large fixture does not raise peak RSS by its size":
-    # Warm up first, so the allocator's arena is already large enough that a
-    # fresh 47 MB allocation cannot hide inside reused pages.
+    # TEMPORARY CI DIAGNOSTICS (ci/zero-copy-diag): stage-by-stage peak,
+    # faults and (on Linux) heap, to find the 119 MB growth whose source
+    # is not visible from macOS. Removed once the mechanism is known.
+    echo "nim: ", NimVersion
+    echo "gen-start peak=", peakRss(), " minflt=", minFlt()
     discard readPsdFile(bigFixture())
+    echo "after warmup peak=", peakRss(), " minflt=", minFlt()
+    when defined(linux):
+      let w0 = vmStat()
+      echo "after warmup vmrss=", w0.rss, " vmhwm=", w0.hwm, " vmdata=", w0.data
     GC_fullCollect()
     let before = peakRss()
+    let beforeFlt = minFlt()
     check before > 0
     var trees: array[3, PsdFile]
     for i in 0 ..< 3:
       trees[i] = readPsdFile(bigFixture())
+      echo "after parse ", i, " peak=", peakRss(), " minflt=", minFlt()
+      when defined(linux):
+        let w = vmStat()
+        echo "after parse ", i, " vmrss=", w.rss, " vmhwm=", w.hwm,
+          " vmdata=", w.data
+    echo "before=", before, " beforeFlt=", beforeFlt
     echo "mapped source: ", isMapped(trees[0].source)
     if isMapped(trees[0].source):
       let growth = peakRss() - before
