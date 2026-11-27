@@ -28,7 +28,7 @@ type
     bytes*: Span ## empty unless `lkEmbedded`
     hasBytes*: bool
 
-proc kindFor*(t: string): LinkedKind =
+proc linkedKindFor*(t: string): LinkedKind =
   case t
   of "liFD": lkEmbedded
   of "liFE": lkExternal
@@ -48,7 +48,7 @@ proc parseLinkedItem*(data: Span): Option[LinkedFile] =
   var r = initReader(data)
   try:
     let typ = r.readStr4()
-    let kind = kindFor(typ)
+    let kind = linkedKindFor(typ)
     discard r.readU32BE() # version
     let uuid = readPascalStr(r)
     let fname = unicodeToString(r.readUnicodeUnits())
