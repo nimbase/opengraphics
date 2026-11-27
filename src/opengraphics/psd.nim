@@ -28,6 +28,7 @@ import psd/docmeta
 import psd/effects
 import psd/linked
 import psd/semantic
+import psd/smartfilters
 import psd/file
 import psd/pixeldata
 import psd/builder
@@ -57,6 +58,7 @@ export docmeta
 export effects
 export linked
 export semantic
+export smartfilters
 export file
 export pixeldata
 export builder

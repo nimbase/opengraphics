@@ -153,3 +153,58 @@ proc extraChannelCount*(f: PsdFile): int =
   let color = if need > 0: need else: min(f.header.channels, 3)
   let hasAlpha = f.header.channels > color
   f.header.channels - color - (if hasAlpha: 1 else: 0)
+
+type
+  DuotoneInk* = object
+    name*: string
+    space*: uint16
+    comps*: array[4, uint16]
+    curve*: seq[tuple[at, v: float64]]
+
+  Duotone* = object
+    inks*: seq[DuotoneInk]
+    dotGain*: int
+
+proc parseDuotone*(data: Span): Duotone =
+  ## 524-byte color-mode data for duotone (mode 8): version 1, 1..4 inks,
+  ## 4x10B colors, 4x64B Pascal names, 4x28B curves, u16 dot gain.
+  if data.len < 524:
+    invalid("short duotone block (" & $data.len & " bytes, need 524)")
+  var r = initReader(data)
+  let ver = r.readU16BE()
+  if ver != 1:
+    invalid("unsupported duotone version " & $ver)
+  let n = int(r.readU16BE())
+  if n < 1 or n > 4:
+    invalid("duotone ink count " & $n & " out of 1..4")
+  var colors: array[4, tuple[space: uint16, c: array[4, uint16]]]
+  for i in 0 ..< 4:
+    colors[i].space = r.readU16BE()
+    for k in 0 ..< 4:
+      colors[i].c[k] = r.readU16BE()
+  var names: array[4, string]
+  for i in 0 ..< 4:
+    if r.remaining() < 64:
+      invalid("short duotone names")
+    let blk = r.bytes(64).clone
+    let ln = min(int(ord(blk[0])), 63)
+    names[i] = blk[1 ..< 1 + ln]
+  # curves: 4x (13xi16 + i16 zero)
+  var curves: array[4, seq[tuple[at, v: float64]]]
+  const grayAt = [0.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0,
+    80.0, 90.0, 95.0, 100.0]
+  for i in 0 ..< 4:
+    for j, at in grayAt:
+      let v = r.readI16BE()
+      if v >= 0:
+        curves[i].add((at / 100.0, float64(v) / 1000.0))
+    discard r.readI16BE() # trailing zero word
+  result.dotGain = int(r.readU16BE())
+  for i in 0 ..< n:
+    result.inks.add(DuotoneInk(name: names[i], space: colors[i].space,
+      comps: colors[i].c, curve: curves[i]))
+
+proc duotoneOf*(f: PsdFile): Option[Duotone] =
+  if f.header.colorMode.kind != cmDuotone: return none(Duotone)
+  try: some(parseDuotone(f.colorModeData))
+  except PsdError: none(Duotone)

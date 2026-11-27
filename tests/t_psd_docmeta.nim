@@ -113,3 +113,42 @@ suite "docmeta: extra channels":
       channels: 5, width: 1, height: 1, depth: 8,
       colorMode: ColorMode(kind: cmRgb)))
     check extraChannelCount(f) == 1
+
+suite "docmeta: duotone":
+  test "524-byte block parses inks and curves":
+    var w = initWriter()
+    w.putU16(1)
+    w.putU16(2)
+    # 4x10B colors: first ink gray (space 8), second empty
+    w.putU16(8)
+    w.putU16(0); w.putU16(0); w.putU16(0); w.putU16(0)
+    for _ in 1 ..< 4:
+      w.putU16(0xFFFF)
+      w.putU16(0); w.putU16(0); w.putU16(0); w.putU16(0)
+    # 4x64B names
+    for nm in ["Black", ""]:
+      var blk = newString(64)
+      blk[0] = char(nm.len)
+      for i, c in nm: blk[1 + i] = c
+      w.put(blk)
+    for _ in 2 ..< 4:
+      w.put(newString(64))
+    # 4x28B curves: 13xi16 + i16 zero; first ink linear-ish
+    for ink in 0 ..< 4:
+      for j in 0 ..< 13:
+        w.putI16(int16(j * 80))
+      w.putI16(0)
+    w.putU16(20)
+    w.put(newString(110)) # 11x10B overprint colors
+    let s = w.toString()
+    check s.len == 524
+    let d = parseDuotone(spanOf(s))
+    check d.inks.len == 2
+    check d.inks[0].name == "Black"
+    check d.dotGain == 20
+
+  test "short duotone raises":
+    var raised = false
+    try: discard parseDuotone(spanOf("\x00\x01"))
+    except PsdError: raised = true
+    check raised
