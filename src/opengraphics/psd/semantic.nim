@@ -21,6 +21,19 @@ import ./path
 import ./tagged
 
 type
+  TextRun* = object
+    ## One style run: `length` chars in `text`/`engineText` rendered alike.
+    length*: int
+    fontIndex*: int ## into `fontNames`, -1 when unknown
+    fontSize*: float64
+    tracking*: int
+    leading*: float64
+    hasLeading*: bool
+
+  ParagraphRun* = object
+    length*: int
+    justification*: int ## 0 left, 1 right, 2 center, 3 justify, ...
+
   TextEngine* = object
     ## A decoded `TySh` type-tool block.
     raw*: Span   ## the block payload, verbatim, as a window into the file
@@ -29,8 +42,16 @@ type
     textVersion*: int
     text*: string ## the descriptor's `Txt  ` field
     engineText*: string ## `/Editor /Text` from the EngineData markup
+    engineData*: string ## full EngineData markup, for runs/paragraphs
     fontNames*: seq[string]
     fontSizes*: seq[float64]
+    runLengths*: seq[int] ## `/RunLengthArray`, parallel to text
+    runs*: seq[TextRun]
+    paragraphs*: seq[ParagraphRun]
+    warpStyle*: string ## warp `warpStyle` enum value, "" when unwarped
+    hasWarp*: bool
+    bounds*: array[4, float32] ## trailing left,top,right,bottom text-space bounds
+    hasBounds*: bool
     hasText*: bool
 
   FillKind* {.pure.} = enum
@@ -224,23 +245,166 @@ proc extractFontSizes*(engineData: string): seq[float64] =
       discard
     i = j
 
+proc extractInts*(engineData, key: string): seq[int] =
+  ## Ints inside `/Key [ a b c ]`, e.g. `/RunLengthArray [ 8 7 5 ]`.
+  result = @[]
+  let at = engineData.find(key)
+  if at < 0: return
+  let open = engineData.find('[', at)
+  if open < 0 or open > at + key.len + 4: return
+  let close = engineData.find(']', open)
+  if close < 0: return
+  for tok in engineData[open + 1 ..< close].splitWhitespace():
+    try: result.add(parseInt(tok))
+    except ValueError: discard
+
+proc extractRunLengths*(engineData: string): seq[int] =
+  extractInts(engineData, "/RunLengthArray")
+
+proc extractJustifications*(engineData: string): seq[int] =
+  ## Every `/Justification <int>` in paragraph style sheets.
+  result = @[]
+  var i = 0
+  const key = "/Justification "
+  while true:
+    let idx = engineData.find(key, i)
+    if idx < 0: break
+    var j = idx + key.len
+    var num = ""
+    while j < engineData.len and engineData[j] in {'0'..'9', '-'}:
+      num.add(engineData[j])
+      inc j
+    try: result.add(parseInt(num))
+    except ValueError: discard
+    i = j
+
+proc extractTrackings*(engineData: string): seq[int] =
+  result = @[]
+  var i = 0
+  const key = "/Tracking "
+  while true:
+    let idx = engineData.find(key, i)
+    if idx < 0: break
+    var j = idx + key.len
+    var num = ""
+    while j < engineData.len and engineData[j] in {'0'..'9', '-'}:
+      num.add(engineData[j])
+      inc j
+    try: result.add(parseInt(num))
+    except ValueError: discard
+    i = j
+
+proc extractLeadings*(engineData: string): seq[float64] =
+  result = @[]
+  var i = 0
+  const key = "/Leading "
+  while true:
+    let idx = engineData.find(key, i)
+    if idx < 0: break
+    var j = idx + key.len
+    var num = ""
+    while j < engineData.len and engineData[j] in {'0'..'9', '.', '-', '+',
+        'e', 'E'}:
+      num.add(engineData[j])
+      inc j
+    try: result.add(parseFloat(num))
+    except ValueError: discard
+    i = j
+
+proc extractFontIndices*(engineData: string): seq[int] =
+  ## Every `/Font <int>` (style-run font reference into `/FontSet`).
+  result = @[]
+  var i = 0
+  while true:
+    let idx = engineData.find("/Font ", i)
+    if idx < 0: break
+    # `/FontSet` and `/FontSize` share the prefix; only a bare `/Font ` counts.
+    let after = idx + "/Font ".len
+    if after < engineData.len and engineData[after] in {'0'..'9'}:
+      var j = after
+      var num = ""
+      while j < engineData.len and engineData[j] in {'0'..'9'}:
+        num.add(engineData[j])
+        inc j
+      try: result.add(parseInt(num))
+      except ValueError: discard
+      i = j
+    else:
+      i = idx + 6
+
+proc buildRuns*(engineData: string): tuple[lengths: seq[int], runs: seq[TextRun],
+    paragraphs: seq[ParagraphRun]] =
+  let lengths = extractRunLengths(engineData)
+  let sizes = extractFontSizes(engineData)
+  let fonts = extractFontIndices(engineData)
+  let tracks = extractTrackings(engineData)
+  let leads = extractLeadings(engineData)
+  let justs = extractJustifications(engineData)
+  var runs: seq[TextRun] = @[]
+  for i, ln in lengths:
+    runs.add(TextRun(length: ln,
+      fontIndex: if i < fonts.len: fonts[i] else: -1,
+      fontSize: if i < sizes.len: sizes[i] else: 0.0,
+      tracking: if i < tracks.len: tracks[i] else: 0,
+      leading: if i < leads.len: leads[i] else: 0.0,
+      hasLeading: i < leads.len))
+  var paras: seq[ParagraphRun] = @[]
+  for i, ln in lengths:
+    paras.add(ParagraphRun(length: ln,
+      justification: if i < justs.len: justs[i] else: 0))
+  (lengths, runs, paras)
+
 proc parseTextEngine*(data: Span): TextEngine =
   ## Parse a `TySh` payload. Raises `PsdError` on a short or unsupported
   ## header; a block whose descriptor we cannot model yields `hasText`
-  ## false rather than raising.
+  ## false rather than raising. Trailing warp + bounds are parsed when
+  ## present: a versioned warp descriptor, then four big-endian f32
+  ## (left, top, right, bottom) in text space.
   let head = tyShHeader(data)
   result.version = head.version
   result.transform = head.transform
   result.textVersion = head.textVersion
   result.raw = data
-  let vd = tryBareDescriptor(head.body)
-  if vd.isSome:
-    let d = vd.get()
+  try:
+    let tp = parseDescriptorPrefix(head.body)
+    let d = tp.descriptor
     let engine = parseEngineData(d)
+    result.engineData = engine
     result.engineText = extractEditorText(engine)
     result.fontNames = extractFontNames(engine)
     result.fontSizes = extractFontSizes(engine)
+    let built = buildRuns(engine)
+    result.runLengths = built.lengths
+    result.runs = built.runs
+    result.paragraphs = built.paragraphs
     result.text = d.getText("Txt ")
+    var rest = head.body.slice(tp.consumed, head.body.len)
+    # Warp: versioned descriptor when present, else raw.
+    if rest.len >= 4:
+      try:
+        let wv = parseVersionedDescriptor(rest)
+        result.hasWarp = true
+        let ws = wv.descriptor.get("warpStyle")
+        if ws.isSome and ws.get().kind == vEnumerated:
+          result.warpStyle = ws.get().valueId.asString()
+        # consume warp descriptor bytes: version + body
+        let wbytes = wv.toBytes().len
+        if rest.len >= wbytes:
+          rest = rest.slice(wbytes, rest.len)
+        else:
+          rest = rest.slice(rest.len, rest.len)
+      except PsdError:
+        discard
+    if rest.len >= 16:
+      try:
+        var r = initReader(rest.slice(rest.len - 16, rest.len))
+        result.bounds = [r.readF32BE(), r.readF32BE(), r.readF32BE(),
+          r.readF32BE()]
+        result.hasBounds = true
+      except PsdError:
+        discard
+  except PsdError:
+    discard
   result.hasText = result.engineText.len > 0 or result.text.len > 0
 
 proc textOf*(layer: LayerRecord): Option[TextEngine] =
