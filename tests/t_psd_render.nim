@@ -805,3 +805,56 @@ test "balance truncated stays transparent":
   ])
   check renderDocument(doc).getPixel(0, 0) ==
     Rgba(r: 0, g: 0, b: 255, a: 255)
+
+# --- selective color ----------------------------------------------------------
+
+proc selcPayload(relative: bool,
+    rows: array[9, array[4, int16]]): seq[byte] =
+  ## `selc`: version 1, method (0 relative), 8 reserved bytes, then nine
+  ## rows of four i16 (cyan, magenta, yellow, black) in percent.
+  result = adjBytesU16(1) & adjBytesU16(if relative: 0 else: 1)
+  result.add(@[byte(0), 0, 0, 0, 0, 0, 0, 0])
+  for row in rows:
+    for v in row:
+      result.add(adjBytesI16(v))
+
+proc selcRows(range: int, vals: array[4, int16]): array[9, array[4, int16]] =
+  for i in 0 ..< 9:
+    result[i] = [0'i16, 0, 0, 0]
+  result[range] = vals
+
+test "selective zeros leave the backdrop alone":
+  let c = selcPayload(false, selcRows(7, [0'i16, 0, 0, 0]))
+  check renderDocument(docOf(@[solid("red", 255, 0, 0),
+    adjLayer("sc", "selc", c)])).getPixel(0, 0) ==
+    Rgba(r: 255, g: 0, b: 0, a: 255)
+
+test "selective absolute neutrals cyan matches the oracle":
+  # Measured: neutrals cyan +50 maps gray 64 to red 32, gray 192 to 129.
+  let c = selcPayload(false, selcRows(7, [50'i16, 0, 0, 0]))
+  check renderDocument(docOf(@[solid("lo", 64, 64, 64),
+    adjLayer("sc", "selc", c)])).getPixel(0, 0) ==
+    Rgba(r: 32, g: 64, b: 64, a: 255)
+  check renderDocument(docOf(@[solid("hi", 192, 192, 192),
+    adjLayer("sc", "selc", c)])).getPixel(0, 0) ==
+    Rgba(r: 129, g: 192, b: 192, a: 255)
+
+test "selective relative and absolute part ways on gray":
+  # Same neutrals cyan +50 on gray 128: absolute inks to near-black red,
+  # relative scales by the ink present and barely moves.
+  let abs = selcPayload(false, selcRows(7, [50'i16, 0, 0, 0]))
+  check renderDocument(docOf(@[solid("mid", 128, 128, 128),
+    adjLayer("sc", "selc", abs)])).getPixel(0, 0) ==
+    Rgba(r: 1, g: 128, b: 128, a: 255)
+  let rel = selcPayload(true, selcRows(7, [50'i16, 0, 0, 0]))
+  check renderDocument(docOf(@[solid("mid", 128, 128, 128),
+    adjLayer("sc", "selc", rel)])).getPixel(0, 0) ==
+    Rgba(r: 65, g: 128, b: 128, a: 255)
+
+test "selective truncated stays transparent":
+  let doc = docOf(@[
+    solid("blue", 0, 0, 255),
+    adjLayer("sc", "selc", @[byte(0), 1, 2, 3]),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 255, a: 255)

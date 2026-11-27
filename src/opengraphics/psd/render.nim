@@ -807,6 +807,41 @@ proc adjustPixel*(adj: Adjustment, r, g, b: int): tuple[r, g, b: int] =
     else:
       let v = clamp(int(round(gray * 255.0)), 0, 255)
       (v, v, v)
+  of akSelectiveColor:
+    # Each range shifts the inks (1 - R,G,B) by its percentages plus black,
+    # weighted by how much the color belongs to the range. Relative scales
+    # by the ink present; absolute by the room the ink has.
+    let c = [float64(r) / 255.0, float64(g) / 255.0, float64(b) / 255.0]
+    let mx = max(c[0], max(c[1], c[2]))
+    let mn = min(c[0], min(c[1], c[2]))
+    let md = c[0] + c[1] + c[2] - mx - mn
+    let top = proc(i: int): float64 =
+      if c[i] >= mx: mx - md else: 0.0
+    let bot = proc(i: int): float64 =
+      if c[i] <= mn: md - mn else: 0.0
+    let w = [top(0), bot(2), top(1), bot(0), top(2), bot(1),
+      max(0.0, (mn - 0.5) * 2.0),
+      clamp(1.0 - abs(mx - 0.5) - abs(mn - 0.5), 0.0, 1.0),
+      max(0.0, (0.5 - mx) * 2.0)]
+    var o: array[3, int]
+    for i in 0 ..< 3:
+      let ink = 1.0 - c[i]
+      var dd = 0.0
+      for rr in 0 ..< 9:
+        if w[rr] <= 0.0:
+          continue
+        let a = float64(adj.selAdjust[rr][i]) / 100.0 +
+          float64(adj.selAdjust[rr][3]) / 100.0
+        var d = a
+        if adj.selRelative:
+          d = d * ink
+        elif d > 0.0:
+          d = d * min(1.0, 2.0 * (1.0 - ink))
+        else:
+          d = d * min(1.0, 2.0 * ink)
+        dd += d * w[rr]
+      o[i] = clamp(int(round((c[i] - dd) * 255.0)), 0, 255)
+    (o[0], o[1], o[2])
   else:
     (r, g, b)
 
@@ -817,7 +852,7 @@ proc isSupportedAdjustment*(adj: Adjustment): bool =
   case adj.kind
   of akInvert, akThreshold, akPosterize, akLevels, akCurves, akExposure,
      akChannelMixer, akBlackWhite, akPhotoFilter, akGradientMap,
-     akColorBalance: true
+     akColorBalance, akSelectiveColor: true
   of akBrightnessContrast: adj.bcLegacy
   else: false
 
