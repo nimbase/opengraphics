@@ -615,3 +615,60 @@ test "blackwhite truncated stays transparent":
   ])
   check renderDocument(doc).getPixel(0, 0) ==
     Rgba(r: 0, g: 0, b: 255, a: 255)
+
+# --- photo filter -----------------------------------------------------------
+
+proc phflPayload(color: array[3, uint16], density: uint32,
+    preserve: bool): seq[byte] =
+  ## `phfl` v2: RGB space, 3x u16 comps, 2 pad bytes, u32 percent density,
+  ## u8 preserve flag.
+  result = adjBytesU16(2) & adjBytesU16(0)
+  for c in color:
+    result.add(adjBytesU16(c))
+  result.add(adjBytesU16(0))
+  result.add(@[byte(density shr 24), byte((density shr 16) and 0xFF),
+    byte((density shr 8) and 0xFF), byte(density and 0xFF)])
+  result.add(if preserve: byte(1) else: byte(0))
+
+proc u16comp(v: int): uint16 =
+  ## 8-bit channel to the 0..65535 space the v2 block stores.
+  uint16(v * 65535 div 255)
+
+test "photofilter density zero is identity":
+  let c = phflPayload([u16comp(255), u16comp(200), u16comp(100)], 0, false)
+  check renderDocument(docOf(@[solid("red", 255, 0, 0),
+    adjLayer("pf", "phfl", c)])).getPixel(0, 0) ==
+    Rgba(r: 255, g: 0, b: 0, a: 255)
+
+test "photofilter warming gel tints white to the gel":
+  # At full density white becomes the filter color itself.
+  let c = phflPayload([u16comp(255), u16comp(200), u16comp(100)], 100, false)
+  check renderDocument(docOf(@[solid("wht", 255, 255, 255),
+    adjLayer("pf", "phfl", c)])).getPixel(0, 0) ==
+    Rgba(r: 255, g: 200, b: 100, a: 255)
+
+test "photofilter warming gel on blue and red":
+  # Cross-checked against an independent transcription of the reference
+  # matrix (sRGB transfer, D50 XYZ, SetLum off).
+  let c = phflPayload([u16comp(255), u16comp(200), u16comp(100)], 100, false)
+  check renderDocument(docOf(@[solid("blu", 0, 0, 255),
+    adjLayer("pf", "phfl", c)])).getPixel(0, 0) ==
+    Rgba(r: 119, g: 0, b: 122, a: 255)
+  let c25 = phflPayload([u16comp(255), u16comp(200), u16comp(100)], 25, false)
+  check renderDocument(docOf(@[solid("red", 255, 0, 0),
+    adjLayer("pf", "phfl", c25)])).getPixel(0, 0) ==
+    Rgba(r: 247, g: 0, b: 0, a: 255)
+
+test "photofilter preserve keeps the luminosity":
+  let c = phflPayload([u16comp(255), u16comp(200), u16comp(100)], 100, true)
+  check renderDocument(docOf(@[solid("gray", 128, 128, 128),
+    adjLayer("pf", "phfl", c)])).getPixel(0, 0) ==
+    Rgba(r: 154, g: 125, b: 72, a: 255)
+
+test "photofilter truncated stays transparent":
+  let doc = docOf(@[
+    solid("blue", 0, 0, 255),
+    adjLayer("pf", "phfl", @[byte(0), 1]),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 255, a: 255)

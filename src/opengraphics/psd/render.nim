@@ -453,6 +453,13 @@ proc sampleAt(m: MaskSampler, x, y: int): int =
 const
   LevelsToePower = 2.2
   LegacyPivot = 128.0 / 255.0
+  D50White = [0.96422, 1.0, 0.82521]
+  SrgbToXyzD50 = [[0.436074, 0.385064, 0.143080],
+    [0.222504, 0.716878, 0.060618],
+    [0.013932, 0.097104, 0.714173]]
+  XyzD50ToSrgb = [[3.133856, -1.616867, -0.490615],
+    [-0.978768, 1.916142, 0.033454],
+    [0.071945, -0.228991, 1.405243]]
 
 proc levelsGammaNim(u, g: float64): float64 =
   ## Midtone gamma with the shadow toe Photoshop uses above gamma 1.
@@ -567,6 +574,54 @@ proc curveTable256*(pts: seq[CurvePoint], pencil: bool): array[256, float64] =
 type
   CurvesTables* = tuple[ch: array[3, array[256, int]], master: array[256, int]]
 
+proc srgbToLinearNim(v: float64): float64 =
+  ## sRGB transfer: encoded to linear light.
+  if v <= 0.04045: v / 12.92
+  else: pow((v + 0.055) / 1.055, 2.4)
+
+proc linearToSrgbNim(v: float64): float64 =
+  ## sRGB transfer: linear light to encoded.
+  if v <= 0.0031308: v * 12.92
+  else: 1.055 * pow(v, 1.0 / 2.4) - 0.055
+
+proc photoMatrixFor*(adj: Adjustment): array[3, array[3, float64]] =
+  ## Photo filter gel as a 3x3 over linear light: XYZ_D50_TO_SRGB x diag(s)
+  ## x SRGB_TO_XYZ_D50, where s scales each ink by the filter color.
+  let d = clamp(float64(adj.pfDensity), 0.0, 1.0)
+  var flin: array[3, float64]
+  for i in 0 ..< 3:
+    flin[i] = srgbToLinearNim(clamp(float64(adj.pfColor[i]), 0.0, 1.0))
+  var s: array[3, float64]
+  for i in 0 ..< 3:
+    let xyz = SrgbToXyzD50[i][0] * flin[0] + SrgbToXyzD50[i][1] * flin[1] +
+      SrgbToXyzD50[i][2] * flin[2]
+    s[i] = 1.0 - d + d * xyz / D50White[i]
+  for r in 0 ..< 3:
+    for c in 0 ..< 3:
+      result[r][c] = XyzD50ToSrgb[r][0] * s[0] * SrgbToXyzD50[0][c] +
+        XyzD50ToSrgb[r][1] * s[1] * SrgbToXyzD50[1][c] +
+        XyzD50ToSrgb[r][2] * s[2] * SrgbToXyzD50[2][c]
+
+proc photoPixel*(m: array[3, array[3, float64]], preserve: bool,
+    r, g, b: int): tuple[r, g, b: int] =
+  ## One pixel through a photo filter matrix, with optional SetLum preserve.
+  let c = [float64(r) / 255.0, float64(g) / 255.0, float64(b) / 255.0]
+  let lin = [srgbToLinearNim(c[0]), srgbToLinearNim(c[1]),
+    srgbToLinearNim(c[2])]
+  var e: array[3, float64]
+  for i in 0 ..< 3:
+    e[i] = linearToSrgbNim(m[i][0] * lin[0] + m[i][1] * lin[1] +
+      m[i][2] * lin[2])
+  if preserve:
+    let want = 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+    let got = 0.3 * e[0] + 0.59 * e[1] + 0.11 * e[2]
+    let d = want - got
+    for i in 0 ..< 3:
+      e[i] += d
+  (clamp(int(round(e[0] * 255.0)), 0, 255),
+    clamp(int(round(e[1] * 255.0)), 0, 255),
+    clamp(int(round(e[2] * 255.0)), 0, 255))
+
 proc curvesTablesFor*(adj: Adjustment): CurvesTables =
   ## 8-bit RGB Curves tables: each channel snapped to a whole level, then the
   ## master at that level, as Photoshop does.
@@ -674,7 +729,7 @@ proc isSupportedAdjustment*(adj: Adjustment): bool =
   ## transparent until its own commit rather than guessing a formula.
   case adj.kind
   of akInvert, akThreshold, akPosterize, akLevels, akCurves, akExposure,
-     akChannelMixer, akBlackWhite: true
+     akChannelMixer, akBlackWhite, akPhotoFilter: true
   of akBrightnessContrast: adj.bcLegacy
   else: false
 
@@ -870,6 +925,10 @@ proc applyAdjustmentLayer*(doc: Document, index: int, canvas: var ImageBuf,
     mode = bmNormal
   let isCurves = adj.kind == akCurves
   let curvesT = if isCurves: curvesTablesFor(adj) else: default(CurvesTables)
+  let isPhoto = adj.kind == akPhotoFilter
+  var photoM: array[3, array[3, float64]]
+  if isPhoto:
+    photoM = photoMatrixFor(adj)
   let dissolve = mode == bmDissolve
   let mask = if layer.layerMask().isSome or layer.hasVectorMask:
                initMaskSampler(doc, index)
@@ -906,6 +965,8 @@ proc applyAdjustmentLayer*(doc: Document, index: int, canvas: var ImageBuf,
           (curvesT.master[curvesT.ch[0][int(dp.r)]],
            curvesT.master[curvesT.ch[1][int(dp.g)]],
            curvesT.master[curvesT.ch[2][int(dp.b)]])
+        elif isPhoto:
+          photoPixel(photoM, adj.pfPreserve, int(dp.r), int(dp.g), int(dp.b))
         else:
           adjustPixel(adj, int(dp.r), int(dp.g), int(dp.b))
       var src = Rgba(r: uint8(ar), g: uint8(ag), b: uint8(ab), a: 255)
