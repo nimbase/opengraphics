@@ -24,10 +24,10 @@
   - Adjustment layers: all 16 keys typed (`levl`, `curv`, `hue2`, `brit`,
     `nvrt`, `thrs`, `post`, `expA`, `vibA`, `blnc`, `mixr`, `grdm`, `phfl`,
     `selc`, `blwh`, `clrL`); anything unreadable stays raw. Nine evaluate
-    live when rendering (invert, threshold, posterize, levels, legacy
-    brightness/contrast, curves, exposure, channel mixer, black & white,
-    photo filter, gradient map, color balance, selective color,
-    hue/saturation, vibrance); the rest stay transparent until their own commit
+    live when rendering (invert, threshold, posterize, levels,
+    brightness/contrast legacy and modern, curves, exposure, channel mixer,
+    black & white, photo filter, gradient map, color balance, selective color,
+    hue/saturation, vibrance); all but color lookup evaluate live
   - Layer effects: `lfx2` master switch + 10 kinds (drop/inner shadow,
     outer/inner glow, bevel, satin, color/gradient/pattern overlay,
     stroke), including multi-lists
@@ -189,10 +189,11 @@ compositor catching up with the model, plus write-side authoring.
 - [x] All 27 blend modes, dissolve, group pass-through, opacity, clipping,
   masks, Blend If, vector-mask rasterisation
 - [ ] Layer effects composited per effect (shadows, glows, overlays, stroke)
-- [ ] Adjustment layers applied as live adjustments instead of transparent layers
-  (live: invert, threshold, posterize, levels, legacy brightness/contrast,
-  curves, exposure, channel mixer, black & white, photo filter, gradient map,
-  color balance, selective color, hue/saturation, vibrance)
+- [x] Adjustment layers applied as live adjustments instead of transparent layers
+  (live: invert, threshold, posterize, levels, brightness/contrast legacy and
+  modern, curves, exposure, channel mixer, black & white, photo filter,
+  gradient map, color balance, selective color, hue/saturation, vibrance;
+  color lookup stays transparent, its profile payload carries no table)
 - [ ] Smart-filter stacks evaluated (params are parsed; `FEid`/`FXid` caches
   are preserved raw today)
 - [ ] Gradient/pattern fills regenerated from descriptors
