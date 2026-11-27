@@ -182,26 +182,38 @@ read-complete for the documented format; what remains is mostly the
 compositor catching up with the model, plus write-side authoring.
 
 ### Render from the parsed model
-- Layer effects composited per effect (shadows, glows, overlays, stroke)
-- Adjustment layers applied as live adjustments instead of transparent layers
-- Smart-filter stacks evaluated (params are parsed; `FEid`/`FXid` caches
+- [x] All 27 blend modes, dissolve, group pass-through, opacity, clipping,
+  masks, Blend If, vector-mask rasterisation
+- [ ] Layer effects composited per effect (shadows, glows, overlays, stroke)
+- [ ] Adjustment layers applied as live adjustments instead of transparent layers
+- [ ] Smart-filter stacks evaluated (params are parsed; `FEid`/`FXid` caches
   are preserved raw today)
-- Gradient/pattern fills regenerated from descriptors
-- Knockout (`knko` is parsed, not applied) and a bitmap-1 polarity oracle
+- [ ] Gradient/pattern fills regenerated from descriptors
+- [ ] Knockout (`knko` is parsed, not applied) and a bitmap-1 polarity oracle
   against Photoshop-written bytes
 
+### PSD model (read)
+- [x] All 16 adjustment keys typed, unknown kept raw
+- [x] `lfx2` effects (master + 10 kinds, multi-lists)
+- [x] Text runs/paragraphs/warp/bounds
+- [x] `SoLd`/`SoLE`/`PlLd`, `lnk2/3/D` files, 54 filter commands
+- [x] `GrFl`/`PtFl` fill content
+- [x] Indexed/Lab previews, multichannel fallback
+- [x] Guides, comps, duotone, channel names, notes
+- [ ] `FEid`/`FXid` cache use, book-ink preview wiring, sound annotations
+
 ### Write-side authoring
-- Authoring type/shape/smart-object/effect/pattern content (today: verbatim
-  blocks plus generic constructors; unknown descriptor types still abort
-  instead of round-tripping)
-- Heavier composites: isolated groups already cost one full-canvas buffer
-  each; effects/adjustments will add to that
+- [x] PSD write done; unmodified files round-trip byte for byte
+- [ ] Authoring type/shape/smart-object/effect/pattern content (today:
+  verbatim blocks plus generic constructors; unknown descriptor types
+  still abort instead of round-tripping)
+- [ ] Heavier composites: isolated groups already cost one full-canvas
+  buffer each; effects/adjustments will add to that
 
 ### Formats
-- Read support for `.eps` and more (writers for the remaining formats;
-  PSD write is done)
-- Format-to-format conversion helpers
-- Building blocks for high-level libraries and apps compatible with popular graphics formats
+- [ ] Read support for `.eps` and more (writers for the remaining formats)
+- [ ] Format-to-format conversion helpers
+- [ ] Building blocks for high-level libraries and apps compatible with popular graphics formats
 
 See `plans/psd-roadmap.md` for the PSD status and its deliberate limitations.
 `audits/` holds dated audits: measurements taken against real files, what they
