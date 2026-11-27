@@ -27,7 +27,7 @@
     live when rendering (invert, threshold, posterize, levels, legacy
     brightness/contrast, curves, exposure, channel mixer, black & white,
     photo filter, gradient map, color balance, selective color,
-    hue/saturation); the rest stay transparent until their own commit
+    hue/saturation, vibrance); the rest stay transparent until their own commit
   - Layer effects: `lfx2` master switch + 10 kinds (drop/inner shadow,
     outer/inner glow, bevel, satin, color/gradient/pattern overlay,
     stroke), including multi-lists
@@ -192,7 +192,7 @@ compositor catching up with the model, plus write-side authoring.
 - [ ] Adjustment layers applied as live adjustments instead of transparent layers
   (live: invert, threshold, posterize, levels, legacy brightness/contrast,
   curves, exposure, channel mixer, black & white, photo filter, gradient map,
-  color balance, selective color, hue/saturation)
+  color balance, selective color, hue/saturation, vibrance)
 - [ ] Smart-filter stacks evaluated (params are parsed; `FEid`/`FXid` caches
   are preserved raw today)
 - [ ] Gradient/pattern fills regenerated from descriptors
