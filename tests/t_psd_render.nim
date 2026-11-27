@@ -352,3 +352,96 @@ test "adjustment at zero opacity does nothing":
   ])
   check renderDocument(doc).getPixel(0, 0) ==
     Rgba(r: 0, g: 0, b: 255, a: 255)
+
+# --- curves ---------------------------------------------------------------
+
+proc curvU16(v: uint16): seq[byte] =
+  adjBytesU16(v)
+
+proc curvPayload(pencil: int, version: uint16, bits: uint32,
+    curves: seq[seq[tuple[o, i: uint16]]] = @[],
+    maps: seq[seq[byte]] = @[]): seq[byte] =
+  ## Non-pencil curves as (output, input) pairs; pencil as 256-byte maps.
+  result = @[byte(pencil)]
+  result.add(adjBytesU16(version))
+  result.add(@[byte(bits shr 24), byte((bits shr 16) and 0xFF),
+    byte((bits shr 8) and 0xFF), byte(bits and 0xFF)])
+  if pencil != 0:
+    for m in maps:
+      result.add(m)
+  else:
+    for pts in curves:
+      result.add(curvU16(uint16(pts.len)))
+      for p in pts:
+        result.add(curvU16(p.o))
+        result.add(curvU16(p.i))
+
+test "curves identity leaves the backdrop alone":
+  let c = curvPayload(0, 1, 0)
+  let doc = docOf(@[
+    solid("red", 255, 0, 0),
+    adjLayer("cv", "curv", c),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 255, g: 0, b: 0, a: 255)
+
+test "curves master invert flips the backdrop":
+  let c = curvPayload(0, 1, 1, @[@[(o: 255'u16, i: 0'u16), (o: 0'u16, i: 255'u16)]])
+  let doc = docOf(@[
+    solid("blue", 0, 0, 255),
+    adjLayer("cv", "curv", c),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 255, g: 255, b: 0, a: 255)
+
+test "curves red channel zeroed kills red":
+  let ident = @[(o: 0'u16, i: 0'u16), (o: 255'u16, i: 255'u16)]
+  let zero = @[(o: 0'u16, i: 0'u16), (o: 0'u16, i: 255'u16)]
+  let c = curvPayload(0, 1, 3, @[ident, zero])
+  let doc = docOf(@[
+    solid("red", 255, 0, 0),
+    adjLayer("cv", "curv", c),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 0, a: 255)
+
+test "curves pencil identity leaves the backdrop alone":
+  var m: seq[byte] = @[]
+  for i in 0 ..< 256:
+    m.add(byte(i))
+  let c = curvPayload(1, 1, 1, maps = @[m])
+  let doc = docOf(@[
+    solid("red", 255, 0, 0),
+    adjLayer("cv", "curv", c),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 255, g: 0, b: 0, a: 255)
+
+test "curves endpoints pin black and white":
+  # S-curve through (0,0), (128,192), (255,255): ends are exact, and the
+  # midpoints pin the spline shape (cross-checked against an independent
+  # transcription of the reference natural spline: 108 and 236).
+  let pts = @[(o: 0'u16, i: 0'u16), (o: 192'u16, i: 128'u16),
+    (o: 255'u16, i: 255'u16)]
+  let c = curvPayload(0, 1, 1, @[pts])
+  check renderDocument(docOf(@[solid("blk", 0, 0, 0),
+    adjLayer("cv", "curv", c)])).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 0, a: 255)
+  check renderDocument(docOf(@[solid("wht", 255, 255, 255),
+    adjLayer("cv", "curv", c)])).getPixel(0, 0) ==
+    Rgba(r: 255, g: 255, b: 255, a: 255)
+  check renderDocument(docOf(@[solid("lo", 64, 64, 64),
+    adjLayer("cv", "curv", c)])).getPixel(0, 0) ==
+    Rgba(r: 108, g: 108, b: 108, a: 255)
+  check renderDocument(docOf(@[solid("hi", 192, 192, 192),
+    adjLayer("cv", "curv", c)])).getPixel(0, 0) ==
+    Rgba(r: 236, g: 236, b: 236, a: 255)
+
+test "curves bad version stays transparent":
+  let c = curvPayload(0, 2, 1, @[@[(o: 255'u16, i: 0'u16)]])
+  let doc = docOf(@[
+    solid("blue", 0, 0, 255),
+    adjLayer("cv", "curv", c),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 255, a: 255)

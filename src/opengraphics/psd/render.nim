@@ -36,6 +36,7 @@
 ##   canvas and blended as one layer, which costs a full-canvas buffer per such
 ##   group. Pass-through groups, the default, blend straight into the backdrop.
 
+import std/algorithm
 import std/math
 import std/options
 
@@ -480,6 +481,106 @@ proc levelsChannelNim(ch: LevelsChannel, v: float64): float64 =
   whole(float64(ch.outBlack) + t *
     (float64(ch.outWhite) - float64(ch.outBlack)))
 
+proc sortedCurvePts(pts: seq[CurvePoint]): seq[tuple[x, y: float64]] =
+  ## Finite points sorted by input, first wins within 1e-6.
+  for p in pts:
+    let x = float64(p.input)
+    let y = float64(p.output)
+    if x != x or y != y or x == Inf or x == NegInf or y == Inf or y == NegInf:
+      continue
+    result.add((x, y))
+  result.sort(proc(a, b: tuple[x, y: float64]): int = cmp(a.x, b.x))
+  var kept: seq[tuple[x, y: float64]] = @[]
+  for p in result:
+    if kept.len > 0 and abs(p.x - kept[^1].x) < 1e-6:
+      continue
+    kept.add(p)
+  kept
+
+proc curveTable256*(pts: seq[CurvePoint], pencil: bool): array[256, float64] =
+  ## One Curves curve sampled at the 256 whole levels: natural cubic spline
+  ## (constant outside the ends, clamped), or piecewise linear for pencil.
+  let clean = sortedCurvePts(pts)
+  if clean.len < 2:
+    for i in 0 ..< 256:
+      result[i] = float64(i) / 255.0
+    return
+  if pencil:
+    var seg = 0
+    for k in 0 ..< 256:
+      let xv = float64(k) / 255.0
+      if xv <= clean[0].x:
+        result[k] = clamp(clean[0].y, 0.0, 1.0)
+        continue
+      if xv >= clean[^1].x:
+        result[k] = clamp(clean[^1].y, 0.0, 1.0)
+        continue
+      while seg + 1 < clean.len - 1 and clean[seg + 1].x < xv:
+        inc seg
+      let (x0, y0) = clean[seg]
+      let (x1, y1) = clean[seg + 1]
+      let t = if x1 > x0: (xv - x0) / (x1 - x0) else: 0.0
+      result[k] = clamp(y0 + (y1 - y0) * t, 0.0, 1.0)
+    return
+  # Natural spline: tridiagonal solve for second derivatives, in float64.
+  let n = clean.len
+  var m2 = newSeq[float64](n)
+  if n > 2:
+    var xs = newSeq[float64](n)
+    var ys = newSeq[float64](n)
+    for i, p in clean:
+      xs[i] = p.x
+      ys[i] = p.y
+    var c = newSeq[float64](n)
+    var d = newSeq[float64](n)
+    for i in 1 ..< n - 1:
+      let (h0, h1) = (xs[i] - xs[i - 1], xs[i + 1] - xs[i])
+      let aa = h0 / 6.0
+      let bb = (h0 + h1) / 3.0
+      let cc = h1 / 6.0
+      let rr = (ys[i + 1] - ys[i]) / h1 - (ys[i] - ys[i - 1]) / h0
+      let denom = bb - aa * c[i - 1]
+      c[i] = cc / denom
+      d[i] = (rr - aa * d[i - 1]) / denom
+    for i in countdown(n - 2, 1):
+      m2[i] = d[i] - c[i] * m2[i + 1]
+  for k in 0 ..< 256:
+    let xv = float64(k) / 255.0
+    if xv <= clean[0].x:
+      result[k] = clamp(clean[0].y, 0.0, 1.0)
+      continue
+    if xv >= clean[n - 1].x:
+      result[k] = clamp(clean[n - 1].y, 0.0, 1.0)
+      continue
+    var i = n - 2
+    for j in 0 ..< n - 1:
+      if xv <= clean[j + 1].x:
+        i = j
+        break
+    let h = clean[i + 1].x - clean[i].x
+    let a = (clean[i + 1].x - xv) / h
+    let b = (xv - clean[i].x) / h
+    result[k] = clamp(a * clean[i].y + b * clean[i + 1].y +
+      ((a * a * a - a) * m2[i] + (b * b * b - b) * m2[i + 1]) * h * h / 6.0,
+      0.0, 1.0)
+
+type
+  CurvesTables* = tuple[ch: array[3, array[256, int]], master: array[256, int]]
+
+proc curvesTablesFor*(adj: Adjustment): CurvesTables =
+  ## 8-bit RGB Curves tables: each channel snapped to a whole level, then the
+  ## master at that level, as Photoshop does.
+  var floats: array[4, array[256, float64]]
+  floats[0] = curveTable256(adj.curvesChannels[0], adj.curvesPencil)
+  floats[1] = curveTable256(adj.curvesChannels[1], adj.curvesPencil)
+  floats[2] = curveTable256(adj.curvesChannels[2], adj.curvesPencil)
+  floats[3] = curveTable256(adj.curvesMaster, adj.curvesPencil)
+  for i in 0 ..< 3:
+    for v in 0 ..< 256:
+      result.ch[i][v] = clamp(int(round(floats[i][v] * 255.0)), 0, 255)
+  for v in 0 ..< 256:
+    result.master[v] = clamp(int(round(floats[3][v] * 255.0)), 0, 255)
+
 proc adjustPixel*(adj: Adjustment, r, g, b: int): tuple[r, g, b: int] =
   ## One 8-bit RGB pixel through a supported adjustment. Callers check
   ## `isSupportedAdjustment` first; unsupported kinds return the pixel.
@@ -523,7 +624,7 @@ proc isSupportedAdjustment*(adj: Adjustment): bool =
   ## exposure, modern brightness/contrast, ...) stays transparent until its
   ## own commit rather than guessing a formula.
   case adj.kind
-  of akInvert, akThreshold, akPosterize, akLevels: true
+  of akInvert, akThreshold, akPosterize, akLevels, akCurves: true
   of akBrightnessContrast: adj.bcLegacy
   else: false
 
@@ -717,6 +818,8 @@ proc applyAdjustmentLayer*(doc: Document, index: int, canvas: var ImageBuf,
   var mode = blendModeFromKey(layer.blendMode)
   if mode == bmPassThrough:
     mode = bmNormal
+  let isCurves = adj.kind == akCurves
+  let curvesT = if isCurves: curvesTablesFor(adj) else: default(CurvesTables)
   let dissolve = mode == bmDissolve
   let mask = if layer.layerMask().isSome or layer.hasVectorMask:
                initMaskSampler(doc, index)
@@ -748,7 +851,13 @@ proc applyAdjustmentLayer*(doc: Document, index: int, canvas: var ImageBuf,
         mv = mv * ifCov div 255
         if mv == 0:
           continue
-      let (ar, ag, ab) = adjustPixel(adj, int(dp.r), int(dp.g), int(dp.b))
+      let (ar, ag, ab) =
+        if isCurves:
+          (curvesT.master[curvesT.ch[0][int(dp.r)]],
+           curvesT.master[curvesT.ch[1][int(dp.g)]],
+           curvesT.master[curvesT.ch[2][int(dp.b)]])
+        else:
+          adjustPixel(adj, int(dp.r), int(dp.g), int(dp.b))
       var src = Rgba(r: uint8(ar), g: uint8(ag), b: uint8(ab), a: 255)
       compositeOver(dp, src, mode, opacity, mv)
       canvas.setPixel(x, y, dp)
