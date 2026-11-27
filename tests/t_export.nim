@@ -60,12 +60,26 @@ test "file saves round-trip":
   let jpg = getTempDir() / "opengraphics_test.jpg"
   let png = getTempDir() / "opengraphics_test.png"
   let tif = getTempDir() / "opengraphics_test.tif"
+  let gif = getTempDir() / "opengraphics_test.gif"
   doc.composite.saveImage(jpg)
   doc.composite.saveImage(png)
   doc.composite.saveImage(tif)
+  doc.composite.saveImage(gif)
   check getFileSize(jpg) > 100
   check readFile(png)[0 ..< 4] == "\x89PNG"
   check readFile(tif)[0 ..< 4] == "II*\x00"
+  check readFile(gif)[0 ..< 6] == "GIF89a"
   removeFile(jpg)
   removeFile(png)
   removeFile(tif)
+  removeFile(gif)
+
+test "formats without a pure-Nim encoder fail loudly":
+  let doc = openPsd("tests" / "data" / "01.psd")
+  for path in ["opengraphics_test.heic", "opengraphics_test.avif",
+      "opengraphics_test.jxl"]:
+    try:
+      doc.composite.saveImage(getTempDir() / path)
+      fail()
+    except ExportError as e:
+      check "no pure-Nim encoder" in e.msg

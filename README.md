@@ -39,8 +39,8 @@
 - Unknown blocks preserved as raw bytes so future writers can round-trip files
 
 ## Prerequisites
-- System libraries with pkg-config files: `libvips` (image decode
-  and color). Text shaping is pure Nim via `harfnim`, no C library.
+- Pure Nim throughout: `harfnim` (text shaping), `archive`
+  (compression), `image` (image encode). No system libraries.
 
 ## Examples
 Runnable versions live in `examples/` (run from the package root).
@@ -62,9 +62,9 @@ for node in doc.layerTree():
   echo node.layer.name()
 echo "index of \"nim-lang\": ", doc.layerByName("nim-lang")
 
-# The flattened composite: PPM needs stdlib only, JPG needs libvips.
+# The flattened composite: PPM needs stdlib only, JPG needs the image package.
 doc.composite.savePpm("preview.ppm")
-doc.composite.saveImage("preview.jpg") # jpg/png/webp/tif/gif/heif/avif/jxl
+doc.composite.saveImage("preview.jpg") # jpg/png/webp/tif/gif (heif/avif/jxl have no pure-Nim encoder yet)
 
 # Text layers (TySh): raw block stays preserved, parsed view is lazy.
 for l in doc.layers:
