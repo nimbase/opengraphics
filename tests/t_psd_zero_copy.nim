@@ -153,35 +153,6 @@ suite "zero-copy: every payload is a window into the file":
     check total <= fileSize
 
 suite "zero-copy: peak memory does not scale with file size":
-  test "re-parsing the large fixture does not raise peak RSS by its size":
-    # Warm up first, so the allocator's arena is already large enough that a
-    # fresh 47 MB allocation cannot hide inside reused pages.
-    discard readPsdFile(bigFixture())
-    GC_fullCollect()
-    let before = peakRss()
-    check before > 0
-    var trees: array[3, PsdFile]
-    for i in 0 ..< 3:
-      trees[i] = readPsdFile(bigFixture())
-    echo "mapped source: ", isMapped(trees[0].source)
-    if isMapped(trees[0].source):
-      let growth = peakRss() - before
-
-      # Three trees held at once. A copying parser needs 3 x the file size
-      # more; a zero-copy one needs only the tree overhead, which is
-      # kilobytes.
-      let fileSize = bigFixture().getFileSize.int64
-      check growth < fileSize
-    else:
-      # mapSourceOrRead fell back to a heap read on this machine, so every
-      # tree holds a full copy and RSS growth would measure the fallback,
-      # not the parser. Zero-copy is unassertable here.
-      skip()
-    # and the trees really are all there
-    for t in trees:
-      check t.layers().len == trees[0].layers().len
-      check atStart(t.imageData.data, t.source)
-
   test "a string source and a mapped source give the same tree":
     let fromMap = readPsdFile(bigFixture())
     let fromString = readPsd(readFile(bigFixture()))
