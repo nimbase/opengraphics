@@ -24,6 +24,7 @@ import psd/slices
 import psd/patterns
 import psd/metadata
 import psd/adjustments
+import psd/docmeta
 import psd/effects
 import psd/linked
 import psd/semantic
@@ -52,6 +53,7 @@ export slices
 export patterns
 export metadata
 export adjustments
+export docmeta
 export effects
 export linked
 export semantic
