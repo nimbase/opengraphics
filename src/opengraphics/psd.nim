@@ -25,6 +25,7 @@ import psd/patterns
 import psd/metadata
 import psd/adjustments
 import psd/effects
+import psd/linked
 import psd/semantic
 import psd/file
 import psd/pixeldata
@@ -52,6 +53,7 @@ export patterns
 export metadata
 export adjustments
 export effects
+export linked
 export semantic
 export file
 export pixeldata

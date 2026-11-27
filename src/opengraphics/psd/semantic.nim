@@ -516,12 +516,12 @@ proc parsePlacedLayer*(data: Span, limits = defaultLimits()): PlacedLayer =
   let sig = data.head(4).clone
   if sig == "plcL":
     return parsePlLd(data)
-  if sig != "soLD":
+  if sig != "soLD" and sig != "soLE":
     invalid("not a placed-layer block (sig '" & sig & "')")
   var r = initReader(data)
   discard r.readStr4()
   result.raw = data
-  result.kind = "SoLd"
+  result.kind = if sig == "soLE": "SoLE" else: "SoLd"
   result.version = int(r.readU32BE())
   if result.version != 4:
     invalid("unsupported SoLd version " & $result.version)
@@ -579,16 +579,17 @@ proc parsePlacedLayer*(data: Span, limits = defaultLimits()): PlacedLayer =
 
 proc placedLayer*(layer: LayerRecord,
     limits = defaultLimits()): Option[PlacedLayer] =
-  ## `SoLd` when present, else `PlLd`, else `none`.
-  for key in ["SoLd", "PlLd"]:
+  ## `SoLd`/`SoLE` when present, else `PlLd`, else `none`.
+  for key in ["SoLd", "SoLE", "PlLd"]:
     let b = layer.getBlock(key)
     if b.isSome:
       return some(parsePlacedLayer(b.get().data, limits))
   none(PlacedLayer)
 
 proc isSmartObject*(layer: LayerRecord): bool {.inline.} =
-  ## True when the layer carries placed-layer data of either kind.
-  layer.getBlock("SoLd").isSome or layer.getBlock("PlLd").isSome
+  ## True when the layer carries placed-layer data of any kind.
+  layer.getBlock("SoLd").isSome or layer.getBlock("SoLE").isSome or
+    layer.getBlock("PlLd").isSome
 
 proc tyShHeader*(data: string): tuple[version: int,
     transform: array[6, float64], textVersion: int, descriptorVersion: int,
