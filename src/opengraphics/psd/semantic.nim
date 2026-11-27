@@ -67,6 +67,20 @@ type
     key*: string ## "SoCo", "GrFl", "PtFl", ...
     solid*: Option[SolidFill]
     version*: int
+    gradAngle*: float64
+    gradScale*: float64
+    gradStyle*: string
+    gradReverse*: bool
+    gradDither*: bool
+    gradAlign*: bool
+    gradOffsetX*, gradOffsetY*: float64
+    gradStops*: seq[tuple[pos: float64, r, g, b: float64]]
+    gradOpacity*: seq[tuple[pos, opacity: float64]]
+    patName*, patId*: string
+    patScale*: float64
+    patAngle*: float64
+    patLink*: bool
+    patPhaseX*, patPhaseY*: float64
 
   PlacedLayer* = object
     ## A smart object. `SoLd` carries a descriptor and `PlLd` a fixed struct;
@@ -419,29 +433,101 @@ proc isTextLayer*(layer: LayerRecord): bool {.inline.} =
 # --- shape fills -----------------------------------------------------------
 
 proc parseFillContent*(data: Span): FillContent =
-  ## A `vscg` payload: a 4-byte content key then, for `SoCo`, a versioned
-  ## descriptor whose `Clr ` object is class `RGBC`.
+  ## A `vscg` payload: a 4-byte content key then a versioned descriptor.
+  ## `SoCo` carries `Clr ` (RGBC); `GrFl` carries gradient settings with
+  ## `Grad`; `PtFl` carries a `Ptrn` pattern reference. Unknown keys keep
+  ## `key` with raw only.
   if data.len < 4:
     invalid("short fill content (" & $data.len & " bytes)")
   result.raw = data
   result.key = data.head(4).clone
-  if result.key != "SoCo":
-    return
+  result.gradAlign = true
+  result.patLink = true
+  result.patScale = 1.0
+  result.gradScale = 1.0
   let vd = tryBlockDescriptor(TaggedBlock(signature: "", key: "",
     data: data, padding: none(Span)))
   if vd.isNone:
     return
   result.version = int(vd.get().version)
-  let clr = vd.get().descriptor.getDescriptor("Clr ")
-  if clr.isNone:
-    return
-  let rgb = clr.get()
-  if rgb.classId.asString() != "RGBC":
-    return
-  if rgb.items.len != 3:
-    return
-  result.solid = some(SolidFill(raw: data, red: rgb.getDouble("Rd  "),
-    green: rgb.getDouble("Grn "), blue: rgb.getDouble("Bl  ")))
+  let d = vd.get().descriptor
+  if result.key == "SoCo":
+    let clr = d.getDescriptor("Clr ")
+    if clr.isNone: return
+    let rgb = clr.get()
+    if rgb.classId.asString() != "RGBC": return
+    if rgb.items.len != 3: return
+    result.solid = some(SolidFill(raw: data, red: rgb.getDouble("Rd  "),
+      green: rgb.getDouble("Grn "), blue: rgb.getDouble("Bl  ")))
+  elif result.key == "GrFl":
+    result.gradAngle = d.get("Angl").map(proc(v: Value): float64 =
+      if v.kind == vUnitFloat: v.floatUnitValue else: 90.0).get(90.0)
+    let sc = d.get("Scl ")
+    if sc.isSome and sc.get().kind == vUnitFloat:
+      result.gradScale = sc.get().floatUnitValue / 100.0
+    let ty = d.get("Type")
+    if ty.isSome and ty.get().kind == vEnumerated:
+      result.gradStyle = ty.get().valueId.asString()
+    result.gradReverse = d.getBool("Rvrs", false)
+    result.gradDither = d.getBool("Dthr", false)
+    result.gradAlign = d.getBool("Algn", true)
+    let ofs = d.getDescriptor("Ofst")
+    if ofs.isSome:
+      let o = ofs.get()
+      let hx = o.get("Hrzn")
+      let vy = o.get("Vrtc")
+      if hx.isSome and hx.get().kind == vUnitFloat:
+        result.gradOffsetX = hx.get().floatUnitValue / 100.0
+      if vy.isSome and vy.get().kind == vUnitFloat:
+        result.gradOffsetY = vy.get().floatUnitValue / 100.0
+    let grad = d.getDescriptor("Grad")
+    if grad.isSome:
+      let g = grad.get()
+      for it in g.items:
+        if it.value.kind == vList:
+          for sv in it.value.items:
+            if sv.kind != vDescriptor and sv.kind != vGlobalObject: continue
+            let sd = if sv.kind == vDescriptor: sv.descriptor else: sv.globalObject
+            let loc = sd.get("Lctn")
+            if loc.isNone or loc.get().kind != vInteger: continue
+            let pos = float64(loc.get().integer) / 4096.0
+            let clr = sd.getDescriptor("Clr ")
+            if clr.isSome:
+              let c = clr.get()
+              # RGBC doubles 0..255; other classes skipped.
+              if c.classId.asString() == "RGBC":
+                result.gradStops.add((pos, c.getDouble("Rd  "),
+                  c.getDouble("Grn "), c.getDouble("Bl  ")))
+              continue
+            let op = sd.get("Opct")
+            if op.isSome and op.get().kind == vUnitFloat:
+              result.gradOpacity.add((pos, op.get().floatUnitValue / 100.0))
+  elif result.key == "PtFl":
+    let ptrn = d.getDescriptor("Ptrn")
+    if ptrn.isSome:
+      let p = ptrn.get()
+      result.patName = p.getText("Nm  ")
+      result.patId = p.getText("Idnt")
+    let sc = d.get("Scl ")
+    if sc.isSome:
+      case sc.get().kind
+      of vUnitFloat: result.patScale = sc.get().floatUnitValue / 100.0
+      of vDouble: result.patScale = sc.get().double / 100.0
+      of vInteger: result.patScale = float64(sc.get().integer) / 100.0
+      else: discard
+    let an = d.get("Angl")
+    if an.isSome and an.get().kind == vUnitFloat:
+      result.patAngle = an.get().floatUnitValue
+    result.patLink = d.getBool("Algn", true)
+    let ph = d.getDescriptor("phase")
+    if ph.isSome:
+      let p = ph.get()
+      let hx = p.get("Hrzn")
+      let vy = p.get("Vrtc")
+      if hx.isSome and hx.get().kind == vDouble:
+        result.patPhaseX = hx.get().double
+      if vy.isSome and vy.get().kind == vDouble:
+        result.patPhaseY = vy.get().double
 
 proc fillContent*(layer: LayerRecord): Option[FillContent] =
   let b = layer.getBlock("vscg")
