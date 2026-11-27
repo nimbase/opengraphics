@@ -63,6 +63,12 @@ suite "smartfilters: stack parsing":
     let f = parseSmartFilter(filterItem("X", "GsnB", "Mltp", 50.0))
     check abs(f.opacity - 0.5f32) < 1e-5
     check f.blend == "Mltp"
+    check f.command == "filter.blur.gaussianBlur"
+
+  test "unknown class stays unsupported":
+    let f = parseSmartFilter(filterItem("Mystery...", "Zzzz"))
+    check f.command == UnsupportedFilter
+    check f.filterClass == "Zzzz"
 
   test "filtersOfLayer reads SoLd payload":
     let data = stackPayload([filterItem("Gaussian Blur...", "GsnB")])

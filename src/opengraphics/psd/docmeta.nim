@@ -208,3 +208,56 @@ proc duotoneOf*(f: PsdFile): Option[Duotone] =
   if f.header.colorMode.kind != cmDuotone: return none(Duotone)
   try: some(parseDuotone(f.colorModeData))
   except PsdError: none(Duotone)
+
+proc alternateDuotoneColors*(resources: openArray[ImageResource]): seq[array[3, uint16]] =
+  ## Resource 1066: alternate Lab colors for book inks, in ink order.
+  ## Each is 10B (space + 4 comps like duotone inks); only Lab entries are
+  ## returned with their three channels, others as zeros.
+  let res = getResource(resources, 1066)
+  if res.isNone or res.get().data.len < 4: return @[]
+  var r = initReader(res.get().data)
+  try:
+    if r.readU16BE() != 1: return @[]
+    let n = int(r.readU16BE())
+    for _ in 0 ..< n:
+      if r.remaining() < 10: break
+      let space = r.readU16BE()
+      var c: array[4, uint16]
+      for k in 0 ..< 4: c[k] = r.readU16BE()
+      if space == 7: # Lab
+        result.add([c[0], c[1], c[2]])
+      else:
+        result.add([0'u16, 0, 0])
+  except PsdError:
+    discard
+
+type
+  ChannelMeta* = object
+    id*: int ## resource id holding the name
+    name*: string
+
+proc channelNames*(resources: openArray[ImageResource]): seq[string] =
+  ## Alpha/spot channel names from 1006 (Unicode) or 1045 (ASCII), in order.
+  for id in [1006, 1045]:
+    let res = getResource(resources, id)
+    if res.isNone: continue
+    var r = initReader(res.get().data)
+    try:
+      if id == 1006:
+        # u32 count? Actually a series of Unicode strings; read to end.
+        while r.remaining() >= 4:
+          let units = r.readUnicodeUnits()
+          result.add(unicodeToString(units))
+        if result.len > 0: return result
+      else:
+        # 1045: Pascal strings? Read length-prefixed ASCII to end.
+        while r.remaining() >= 1:
+          let n = int(r.readU8())
+          if n > r.remaining(): break
+          result.add(r.bytes(n).clone)
+          if (r.offset and 1) != 0 and r.remaining() > 0:
+            discard r.readU8() # pad
+        if result.len > 0: return result
+    except PsdError:
+      continue
+  @[]

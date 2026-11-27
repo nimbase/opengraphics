@@ -152,3 +152,24 @@ suite "docmeta: duotone":
     try: discard parseDuotone(spanOf("\x00\x01"))
     except PsdError: raised = true
     check raised
+
+suite "docmeta: alternate colors and channel names":
+  test "1066 Lab entries parse":
+    var w = initWriter()
+    w.putU16(1)
+    w.putU16(1)
+    w.putU16(7)
+    w.putU16(30000); w.putU16(100); w.putU16(200); w.putU16(0)
+    let res = newImageResource(1066, w.toString())
+    let cols = alternateDuotoneColors(@[res])
+    check cols.len == 1
+    check cols[0][0] == 30000
+
+  test "wrong 1066 version gives empty":
+    var w = initWriter()
+    w.putU16(2)
+    w.putU16(0)
+    check alternateDuotoneColors(@[newImageResource(1066, w.toString())]).len == 0
+
+  test "no channel names gives empty":
+    check channelNames(@[]).len == 0

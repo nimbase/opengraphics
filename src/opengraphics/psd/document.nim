@@ -21,6 +21,7 @@ import std/options
 import std/sequtils
 
 import ./compression
+import ./docmeta
 import ./error
 import ./file
 import ./header
@@ -38,6 +39,7 @@ export layers
 export pixels
 export resources
 export semantic
+export docmeta
 
 type
   ReadOptions* = object
@@ -396,6 +398,22 @@ proc saveThumbnailJpeg*(d: Document, path: string) =
   if t.isNone:
     invalid("cannot write thumbnail: file has none")
   saveThumbnailJpeg(t.get(), path)
+
+proc guidesOf*(d: Document): Guides {.inline.} =
+  ## Document guides (1092 colors when present, else 1032).
+  guidesOf(d.file.resources)
+
+proc compsOf*(d: Document): Option[Comps] {.inline.} =
+  compsOf(d.file.resources)
+
+proc duotoneOf*(d: Document): Option[Duotone] {.inline.} =
+  duotoneOf(d.file)
+
+proc channelNames*(d: Document): seq[string] {.inline.} =
+  channelNames(d.file.resources)
+
+proc extraChannelCount*(d: Document): int {.inline.} =
+  extraChannelCount(d.file)
 
 proc parseThumbnail*(data: string): Thumbnail =
   parseThumbnail(toSpan(data))
