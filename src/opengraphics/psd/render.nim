@@ -625,6 +625,65 @@ proc photoPixel*(m: array[3, array[3, float64]], preserve: bool,
 type
   GradientStop* = tuple[pos: float64, rgb: array[3, float64]]
 
+  BalanceCurveNim* = tuple[b, w, e: float64, hasKnee: bool,
+    u0, s0, kp, kd: float64]
+
+proc balanceFinite(v: float32): float64 =
+  ## Slider value clamped to its range, non-finite treated as zero.
+  let x = float64(v)
+  if x != x or x == Inf or x == NegInf: 0.0
+  else: clamp(x, -100.0, 100.0)
+
+proc balanceCurveFor*(shadows, midtones, highlights: array[3, float32],
+    preserve: bool, ch: int): BalanceCurveNim =
+  ## One channel's color balance curve: black/white points from the shadow and
+  ## highlight sliders, a midtone gamma with a Hermite join above gamma 1.
+  var sh, md, hl: array[3, float64]
+  for i in 0 ..< 3:
+    sh[i] = balanceFinite(shadows[i])
+    md[i] = balanceFinite(midtones[i])
+    hl[i] = balanceFinite(highlights[i])
+  let (ownSh, ownMd, ownHl) = (sh[ch], md[ch], hl[ch])
+  let (maxSh, maxMd) = (max(sh[0], max(sh[1], sh[2])), max(md[0], max(md[1], md[2])))
+  let (minMd, minHl) = (min(md[0], min(md[1], md[2])), min(hl[0], min(hl[1], hl[2])))
+  var black, white, m: float64
+  if preserve:
+    black = maxSh - ownSh
+    white = ownHl - minHl
+    m = ownMd - (maxMd + minMd) / 2.0
+  else:
+    black = max(-ownSh, 0.0)
+    white = max(ownHl, 0.0)
+    m = ownMd + (ownSh + ownHl) / 2.0
+  let gamma = pow(2.0, m / 100.0)
+  let e = 1.0 / max(gamma, 0.01)
+  result = (b: black / 255.0, w: 1.0 - white / 255.0, e: e, hasKnee: false,
+    u0: 0.0, s0: 0.0, kp: 0.0, kd: 0.0)
+  if gamma > 1.0:
+    let s0 = pow(2.0, gamma)
+    let u0 = min(2.0 * pow(s0, 1.0 / (e - 1.0)), 1.0)
+    if u0 == u0 and u0 > 0.0:
+      result.hasKnee = true
+      result.u0 = u0
+      result.s0 = s0
+      result.kp = pow(u0, e)
+      result.kd = e * pow(u0, e - 1.0)
+
+proc balanceEvalNim*(c: BalanceCurveNim, v: float64): float64 =
+  ## The curve at one 0..1 sample.
+  var vv = if v != v: 0.0 else: clamp(v, 0.0, 1.0)
+  if vv >= c.w:
+    return 1.0
+  if vv <= c.b:
+    return 0.0
+  let u = (vv - c.b) / (c.w - c.b)
+  if c.hasKnee and u < c.u0:
+    let t = u / c.u0
+    let (t2, t3) = (t * t, t * t * t)
+    return clamp((t3 - 2.0 * t2 + t) * c.u0 * c.s0 +
+      (3.0 * t2 - 2.0 * t3) * c.kp + (t3 - t2) * c.u0 * c.kd, 0.0, 1.0)
+  pow(u, c.e)
+
 const
   Bayer4 = [0.0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5]
 
@@ -757,7 +816,8 @@ proc isSupportedAdjustment*(adj: Adjustment): bool =
   ## transparent until its own commit rather than guessing a formula.
   case adj.kind
   of akInvert, akThreshold, akPosterize, akLevels, akCurves, akExposure,
-     akChannelMixer, akBlackWhite, akPhotoFilter, akGradientMap: true
+     akChannelMixer, akBlackWhite, akPhotoFilter, akGradientMap,
+     akColorBalance: true
   of akBrightnessContrast: adj.bcLegacy
   else: false
 
@@ -966,6 +1026,12 @@ proc applyAdjustmentLayer*(doc: Document, index: int, canvas: var ImageBuf,
       gradStops.add((float64(s.pos),
         [float64(s.rgb[0]), float64(s.rgb[1]), float64(s.rgb[2])]))
     gradStops.sort(proc(a, b: GradientStop): int = cmp(a.pos, b.pos))
+  let isBalance = adj.kind == akColorBalance
+  var balT: array[3, BalanceCurveNim]
+  if isBalance:
+    for ch in 0 ..< 3:
+      balT[ch] = balanceCurveFor(adj.cbShadows, adj.cbMidtones,
+        adj.cbHighlights, adj.cbPreserve, ch)
   let dissolve = mode == bmDissolve
   let mask = if layer.layerMask().isSome or layer.hasVectorMask:
                initMaskSampler(doc, index)
@@ -1016,6 +1082,10 @@ proc applyAdjustmentLayer*(doc: Document, index: int, canvas: var ImageBuf,
           (clamp(int(round(o[0] * 255.0)), 0, 255),
             clamp(int(round(o[1] * 255.0)), 0, 255),
             clamp(int(round(o[2] * 255.0)), 0, 255))
+        elif isBalance:
+          (clamp(int(round(balanceEvalNim(balT[0], float64(dp.r) / 255.0) * 255.0)), 0, 255),
+            clamp(int(round(balanceEvalNim(balT[1], float64(dp.g) / 255.0) * 255.0)), 0, 255),
+            clamp(int(round(balanceEvalNim(balT[2], float64(dp.b) / 255.0) * 255.0)), 0, 255))
         else:
           adjustPixel(adj, int(dp.r), int(dp.g), int(dp.b))
       var src = Rgba(r: uint8(ar), g: uint8(ag), b: uint8(ab), a: 255)

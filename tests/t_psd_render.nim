@@ -747,3 +747,61 @@ test "gradientmap bad version stays transparent":
   ])
   check renderDocument(doc).getPixel(0, 0) ==
     Rgba(r: 0, g: 0, b: 255, a: 255)
+
+# --- color balance --------------------------------------------------------
+
+proc blncPayload(shadows, midtones, highlights: array[3, int16],
+    preserve: bool): seq[byte] =
+  ## `blnc`: three tones of three i16 (-100..100), then a preserve byte.
+  result = @[]
+  for tone in [shadows, midtones, highlights]:
+    for v in tone:
+      result.add(adjBytesI16(v))
+  result.add(if preserve: byte(1) else: byte(0))
+
+test "balance zeros leave the backdrop alone":
+  let c = blncPayload([0'i16, 0, 0], [0'i16, 0, 0], [0'i16, 0, 0], false)
+  check renderDocument(docOf(@[solid("red", 255, 0, 0),
+    adjLayer("cb", "blnc", c)])).getPixel(0, 0) ==
+    Rgba(r: 255, g: 0, b: 0, a: 255)
+
+test "balance midtones red lifts the red ramp":
+  # Photoshop oracle: midtones +50 maps gray 64 to 96 and gray 128 to 156;
+  # the 128 point sits on a .5 rounding boundary (float32 vs float64 land
+  # on different sides), so it pins within the reference's own +/-1.
+  let c = blncPayload([0'i16, 0, 0], [50'i16, 0, 0], [0'i16, 0, 0], false)
+  check renderDocument(docOf(@[solid("lo", 64, 64, 64),
+    adjLayer("cb", "blnc", c)])).getPixel(0, 0) ==
+    Rgba(r: 96, g: 64, b: 64, a: 255)
+  let px = renderDocument(docOf(@[solid("mid", 128, 128, 128),
+    adjLayer("cb", "blnc", c)])).getPixel(0, 0)
+  check abs(int(px.r) - 156) <= 1
+  check px.g == 128
+  check px.b == 128
+
+test "balance shadows and highlights move the ends":
+  # Photoshop oracles: shadows -100 maps gray 128 to red 23, highlights
+  # +100 maps it to 223; green is untouched in both.
+  let sh = blncPayload([-100'i16, 0, 0], [0'i16, 0, 0], [0'i16, 0, 0], false)
+  check renderDocument(docOf(@[solid("mid", 128, 128, 128),
+    adjLayer("cb", "blnc", sh)])).getPixel(0, 0) ==
+    Rgba(r: 23, g: 128, b: 128, a: 255)
+  let hi = blncPayload([0'i16, 0, 0], [0'i16, 0, 0], [100'i16, 0, 0], false)
+  check renderDocument(docOf(@[solid("mid", 128, 128, 128),
+    adjLayer("cb", "blnc", hi)])).getPixel(0, 0) ==
+    Rgba(r: 223, g: 128, b: 128, a: 255)
+
+test "balance preserve luminosity rebalances across channels":
+  # Measured: shadows red and blue +50 darken only green, 128 to 97.
+  let c = blncPayload([50'i16, 0, 50], [0'i16, 0, 0], [0'i16, 0, 0], true)
+  check renderDocument(docOf(@[solid("mid", 128, 128, 128),
+    adjLayer("cb", "blnc", c)])).getPixel(0, 0) ==
+    Rgba(r: 128, g: 97, b: 128, a: 255)
+
+test "balance truncated stays transparent":
+  let doc = docOf(@[
+    solid("blue", 0, 0, 255),
+    adjLayer("cb", "blnc", @[byte(0), 1, 2, 3]),
+  ])
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 255, a: 255)
