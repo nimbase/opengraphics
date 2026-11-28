@@ -201,6 +201,51 @@ suite "effects: lfx2 descriptor":
     check abs(e.glowRange - 0.4f32) < 1e-6
     check not e.glowPrecise
 
+  test "stroke parses paint size and position":
+    var fr = newDescriptor("FrFX")
+    discard fr.add("enab", boolValue(true))
+    discard fr.add("Sz  ", doubleValue(4.0))
+    discard fr.add("Styl", enumValue("Styl", "CtrF"))
+    var clr = newDescriptor("RGBC")
+    discard clr.add("Rd  ", doubleValue(1.0))
+    discard clr.add("Grn ", doubleValue(2.0))
+    discard clr.add("Bl  ", doubleValue(3.0))
+    discard fr.add("Clr ", descriptorValue(clr))
+    var d = newDescriptor("null")
+    discard d.add("FrFX", descriptorValue(fr))
+    let e = parseLfx2(lfx2Payload(d)).get().effects[0]
+    check e.kind == ekStroke
+    check e.strokeSize == 4.0f32
+    check e.strokePosition == "CtrF"
+    check e.strokeColor == [1.0f32, 2.0f32, 3.0f32]
+    check not e.strokeGradient
+    check not e.strokePattern
+
+  test "stroke defaults to an outside solid stroke":
+    var fr = newDescriptor("FrFX")
+    discard fr.add("enab", boolValue(true))
+    var d = newDescriptor("null")
+    discard d.add("FrFX", descriptorValue(fr))
+    let e = parseLfx2(lfx2Payload(d)).get().effects[0]
+    check e.strokeSize == 3.0f32
+    check e.strokePosition == "Outs"
+    check e.strokeColor == [0.0f32, 0.0f32, 0.0f32]
+
+  test "stroke gradient and pattern paint flag as unpainted":
+    var fr = newDescriptor("FrFX")
+    discard fr.add("enab", boolValue(true))
+    discard fr.add("PntT", enumValue("FrFl", "GrFl"))
+    discard fr.add("Grad", descriptorValue(newDescriptor("Grad")))
+    var d = newDescriptor("null")
+    discard d.add("FrFX", descriptorValue(fr))
+    check parseLfx2(lfx2Payload(d)).get().effects[0].strokeGradient
+    var fr2 = newDescriptor("FrFX")
+    discard fr2.add("enab", boolValue(true))
+    discard fr2.add("Ptrn", descriptorValue(newDescriptor("Ptrn")))
+    var d2 = newDescriptor("null")
+    discard d2.add("FrFX", descriptorValue(fr2))
+    check parseLfx2(lfx2Payload(d2)).get().effects[0].strokePattern
+
   test "short payload stays none, not a crash":
     check parseLfx2(Span(src: newStringSource("\x00\x01"),
       start: 0, stop: 2)).isNone

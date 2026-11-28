@@ -191,7 +191,7 @@ compositor catching up with the model, plus write-side authoring.
 - [x] All 27 blend modes, dissolve, group pass-through, opacity, clipping,
   masks, Blend If, vector-mask rasterisation
 - [ ] Layer effects composited per effect (live: drop/inner shadow, outer/inner
-  glow, color overlay; next: gradient/pattern overlays, stroke, bevel,
+  glow, color overlay, stroke; next: gradient/pattern overlays, bevel,
   satin; precise techniques, custom contours and noise stay unpainted)
 - [x] Adjustment layers applied as live adjustments instead of transparent layers
   (live: invert, threshold, posterize, levels, brightness/contrast legacy and

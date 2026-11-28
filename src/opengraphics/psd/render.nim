@@ -1556,6 +1556,24 @@ proc sizeOneBlurNim*(plane: var seq[float64], w, h: int) =
   const taps = [0.25, 0.5, 0.25]
   blurSeparableNim(plane, w, h, taps, 1)
 
+proc erodePlaneNim*(plane: var seq[float64], w, h: int, radius: int) =
+  ## Box min-filter erosion, separable row then column passes. The dual of
+  ## dilation: keeps what is fully covered `radius` pixels in.
+  if radius <= 0 or plane.len == 0: return
+  var tmp = newSeq[float64](w * h)
+  for y in 0 ..< h:
+    for x in 0 ..< w:
+      var m = 1.0
+      for dx in -radius .. radius:
+        m = min(m, plane[y * w + clamp(x + dx, 0, w - 1)])
+      tmp[y * w + x] = m
+  for x in 0 ..< w:
+    for y in 0 ..< h:
+      var m = 1.0
+      for dy in -radius .. radius:
+        m = min(m, tmp[clamp(y + dy, 0, h - 1) * w + x])
+      plane[y * w + x] = m
+
 proc dilatePlaneNim*(plane: var seq[float64], w, h: int, radius: int) =
   ## Box max-filter dilation, separable row then column passes. The plane is
   ## zero past the effect's reach, so clamped edges match zero-fill.
@@ -1968,6 +1986,93 @@ proc applyInnerShadows*(doc: Document, index: int, li: var LayerImage,
         px.b = uint8(int(px.b) + (int(bl.b) - int(px.b)) * op div 255)
         li.img.setPixel(x - int(r.left), y - int(r.top), px)
 
+proc applyStrokes*(doc: Document, index: int, li: LayerImage,
+    canvas: var ImageBuf, groupOpacity: int, base: ClipBase) =
+  ## Paint enabled solid-color strokes over one layer, bottom of the stack
+  ## first. Hard bands from box dilation (outside) and erosion (inside);
+  ## gradient and pattern paint stay unpainted for now, as do subpixel edges.
+  let layer = doc.layers()[index]
+  let fx = effectsOf(layer)
+  if fx.isNone or not fx.get().master: return
+  let opacity = layer.opacity * groupOpacity div 255
+  if opacity <= 0 or canvas.isEmpty(): return
+  let r = layer.rect
+  let mask = if layer.layerMask().isSome or layer.hasVectorMask:
+               initMaskSampler(doc, index)
+             else: MaskSampler()
+  let clipped = layer.clipping != 0
+  let effects = fx.get().effects
+  for i in countdown(effects.high, 0):
+    let e = effects[i]
+    if e.kind != ekStroke or not e.common.enabled: continue
+    if e.strokeGradient or e.strokePattern: continue
+    let (inW, outW) =
+      case e.strokePosition
+      of "InsF": (float64(e.strokeSize), 0.0)
+      of "CtrF": (float64(e.strokeSize) / 2.0, float64(e.strokeSize) / 2.0)
+      else: (0.0, float64(e.strokeSize))
+    let inR = int(round(inW))
+    let outR = int(round(outW))
+    let m = max(inR, outR) + 2
+    let x0 = max(int(r.left) - m, 0)
+    let y0 = max(int(r.top) - m, 0)
+    let x1 = min(int(r.right) + m, canvas.width)
+    let y1 = min(int(r.bottom) + m, canvas.height)
+    if x1 <= x0 or y1 <= y0: continue
+    let pw = x1 - x0
+    let ph = y1 - y0
+    var plane = newSeq[float64](pw * ph)
+    for y in y0 ..< y1:
+      for x in x0 ..< x1:
+        if x < int(r.left) or x >= int(r.right) or y < int(r.top) or
+            y >= int(r.bottom):
+          continue
+        let a = int(li.img.getPixel(x - int(r.left), y - int(r.top)).a)
+        var mv = 255
+        if mask.present: mv = mask.sampleAt(x, y)
+        plane[(y - y0) * pw + (x - x0)] =
+          float64(a) * float64(mv) / (255.0 * 255.0)
+    var dil = plane
+    dilatePlaneNim(dil, pw, ph, outR)
+    var ero = plane
+    erodePlaneNim(ero, pw, ph, inR)
+    for y in y0 ..< y1:
+      for x in x0 ..< x1:
+        let k = (y - y0) * pw + (x - x0)
+        let s = plane[k]
+        plane[k] =
+          if s >= 0.5:
+            if inR > 0: max(s - ero[k], 0.0) else: 0.0
+          else:
+            if outR > 0: max(dil[k] - s, 0.0) else: 0.0
+    let smode = effectBlendModeFromKey(e.common.blend)
+    let dissolve = smode == bmDissolve
+    let op = clamp(int(round(float64(e.common.opacity) * 255.0)), 0, 255)
+    if op <= 0: continue
+    let sr = uint8(clamp(int(round(float64(e.strokeColor[0]))), 0, 255))
+    let sg = uint8(clamp(int(round(float64(e.strokeColor[1]))), 0, 255))
+    let sb = uint8(clamp(int(round(float64(e.strokeColor[2]))), 0, 255))
+    for y in y0 ..< y1:
+      for x in x0 ..< x1:
+        let cov = plane[(y - y0) * pw + (x - x0)]
+        if cov <= 0.0: continue
+        if clipped:
+          if not base.has or x < int(base.rect.left) or
+              x >= int(base.rect.right) or y < int(base.rect.top) or
+              y >= int(base.rect.bottom):
+            continue
+          let bpx = base.img.getPixel(x - int(base.rect.left),
+            y - int(base.rect.top))
+          if bpx.a == 0: continue
+        if dissolve and not dissolveKeeps(x, y, opacity): continue
+        let o = clamp(int(round(cov * float64(op) * float64(opacity) / 255.0)),
+          0, 255)
+        if o <= 0: continue
+        var dp = canvas.getPixel(x, y)
+        var src = Rgba(r: sr, g: sg, b: sb, a: 255)
+        compositeOver(dp, src, smode, o, 255)
+        canvas.setPixel(x, y, dp)
+
 proc groupIsIsolated(l: LayerRecord): bool =
   ## Whether a group's children are composited as a unit rather than blended
   ## straight into the backdrop beneath the group.
@@ -2026,6 +2131,7 @@ proc renderSiblings(doc: Document, nodes: seq[LayerNode], canvas: var ImageBuf,
       applyDropShadows(doc, idx, li, canvas, groupOpacity, base)
       applyOuterGlows(doc, idx, li, canvas, groupOpacity, base)
       blendLayerOnto(doc, idx, li, canvas, groupOpacity, base)
+      applyStrokes(doc, idx, li, canvas, groupOpacity, base)
       if n.layer.clipping == 0 and not li.img.isEmpty():
         base = ClipBase(has: true, rect: n.layer.rect, img: li.img)
 

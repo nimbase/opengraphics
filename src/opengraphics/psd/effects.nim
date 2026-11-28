@@ -51,8 +51,14 @@ type
       glowCenter*: bool ## inner only: `glwS` SrcC paints from the center
     of ekColorOverlay:
       overlayColor*: array[3, float32] ## 0..255 RGB (`Clr `, black when absent)
+    of ekStroke:
+      strokeSize*: float32 ## `Sz  ` in px, default 3
+      strokePosition*: string ## "Outs", "InsF" or "CtrF" (`Styl`, default outside)
+      strokeColor*: array[3, float32] ## 0..255 RGB (`Clr `, black when absent)
+      strokeGradient*: bool ## `Grad` paint present; gradient strokes stay unpainted
+      strokePattern*: bool ## `Ptrn` paint present; pattern strokes stay unpainted
     of ekBevelEmboss, ekSatin, ekGradientOverlay,
-        ekPatternOverlay, ekStroke, ekUnknown:
+        ekPatternOverlay, ekUnknown:
       discard
 
 const
@@ -160,6 +166,31 @@ proc parseOne(key: string, d: Descriptor): Option[Effect] =
       col = [cc.getDouble("Rd  ", 0.0).float32,
         cc.getDouble("Grn ", 0.0).float32, cc.getDouble("Bl  ", 0.0).float32]
     some(Effect(raw: d, key: key, kind: k, common: c, overlayColor: col))
+  of ekStroke:
+    var col = [0.0f32, 0.0f32, 0.0f32]
+    let cd = d.getDescriptor("Clr ")
+    if cd.isSome and cd.get().classId.asString() == "RGBC":
+      let cc = cd.get()
+      col = [cc.getDouble("Rd  ", 0.0).float32,
+        cc.getDouble("Grn ", 0.0).float32, cc.getDouble("Bl  ", 0.0).float32]
+    let pt = d.get("PntT")
+    let paintId =
+      if pt.isSome and pt.get().kind == vEnumerated: pt.get().valueId.asString()
+      else: ""
+    let st = d.get("Styl")
+    let pos =
+      if st.isSome and st.get().kind == vEnumerated:
+        case st.get().valueId.asString()
+        of "InsF": "InsF"
+        of "CtrF": "CtrF"
+        else: "Outs"
+      else: "Outs"
+    some(Effect(raw: d, key: key, kind: k, common: c,
+      strokeSize: numOf(d, "Sz  ", 3.0),
+      strokePosition: pos,
+      strokeColor: col,
+      strokeGradient: paintId == "GrFl" or d.get("Grad").isSome,
+      strokePattern: paintId == "Ptrn" or d.get("Ptrn").isSome))
   else:
     some(Effect(raw: d, key: key, kind: k))
 

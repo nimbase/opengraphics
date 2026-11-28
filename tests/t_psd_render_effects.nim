@@ -487,3 +487,92 @@ test "disabled inner shadow paints nothing":
     extra = @[("lfx2", fx)])], 7, 5)
   check renderDocument(doc).getPixel(3, 1) ==
     Rgba(r: 255, g: 128, b: 0, a: 255)
+
+# --- stroke ---------------------------------------------------------------------
+
+proc strokeFx(size: float64, pos, blend: string, color: array[3, float64],
+    opacity = 100.0, gradient = false, pattern = false,
+    enabled = true): seq[byte] =
+  var fr = newDescriptor("FrFX")
+  discard fr.add("enab", boolValue(enabled))
+  discard fr.add("Md  ", enumValue("BlnM", blend))
+  discard fr.add("Opct", unitFloatValue("#Prc", opacity))
+  discard fr.add("Sz  ", doubleValue(size))
+  discard fr.add("Styl", enumValue("Styl", pos))
+  if gradient:
+    discard fr.add("PntT", enumValue("FrFl", "GrFl"))
+    discard fr.add("Grad", descriptorValue(newDescriptor("Grad")))
+  elif pattern:
+    discard fr.add("PntT", enumValue("FrFl", "Ptrn"))
+    discard fr.add("Ptrn", descriptorValue(newDescriptor("Ptrn")))
+  else:
+    discard fr.add("PntT", enumValue("FrFl", "SClr"))
+  var clr = newDescriptor("RGBC")
+  discard clr.add("Rd  ", doubleValue(color[0]))
+  discard clr.add("Grn ", doubleValue(color[1]))
+  discard clr.add("Bl  ", doubleValue(color[2]))
+  discard fr.add("Clr ", descriptorValue(clr))
+  var top = newDescriptor("null")
+  discard top.add("FrFX", descriptorValue(fr))
+  var w = initWriter()
+  w.putU32(0)
+  w.putU32(16)
+  w.writeDescriptorBody(top)
+  let s = w.toString()
+  spanBytes(Span(src: newStringSource(s), start: 0, stop: s.len))
+
+test "outside stroke rings the shape":
+  let fx = strokeFx(2, "Outs", "Nrml", [0.0, 0, 0])
+  let doc = docOfFx(@[pxLayer("blk", 3, 3, 4, 4, 0, 0, 0,
+    extra = @[("lfx2", fx)])], 7, 7)
+  let img = renderDocument(doc)
+  check img.getPixel(3, 3) == Rgba(r: 0, g: 0, b: 0, a: 255)
+  check img.getPixel(1, 1) == Rgba(r: 0, g: 0, b: 0, a: 255)
+  check img.getPixel(5, 5) == Rgba(r: 0, g: 0, b: 0, a: 255)
+  check img.getPixel(0, 0).a == 0
+  check img.getPixel(6, 3).a == 0
+
+test "inside stroke fills inward from the edge":
+  let fx = strokeFx(2, "InsF", "Nrml", [255.0, 0, 0])
+  let doc = docOfFx(@[pxLayer("wht", 1, 1, 8, 8, 255, 255, 255,
+    extra = @[("lfx2", fx)])], 9, 9)
+  let img = renderDocument(doc)
+  check img.getPixel(4, 1) == Rgba(r: 255, g: 0, b: 0, a: 255)
+  check img.getPixel(4, 2) == Rgba(r: 255, g: 0, b: 0, a: 255)
+  check img.getPixel(4, 3) == Rgba(r: 255, g: 255, b: 255, a: 255)
+
+test "center stroke straddles the edge":
+  let fx = strokeFx(2, "CtrF", "Nrml", [0.0, 0, 0])
+  let doc = docOfFx(@[pxLayer("blk", 3, 3, 4, 4, 0, 0, 0,
+    extra = @[("lfx2", fx)])], 7, 7)
+  let img = renderDocument(doc)
+  check img.getPixel(3, 3) == Rgba(r: 0, g: 0, b: 0, a: 255)
+  check img.getPixel(2, 2) == Rgba(r: 0, g: 0, b: 0, a: 255)
+  check img.getPixel(1, 1).a == 0
+
+test "gradient stroke stays unpainted":
+  let fx = strokeFx(2, "Outs", "Nrml", [0.0, 0, 0], gradient = true)
+  let doc = docOfFx(@[pxLayer("blk", 3, 3, 4, 4, 0, 0, 0,
+    extra = @[("lfx2", fx)])], 7, 7)
+  check renderDocument(doc).getPixel(1, 1).a == 0
+
+test "pattern stroke stays unpainted":
+  let fx = strokeFx(2, "Outs", "Nrml", [0.0, 0, 0], pattern = true)
+  let doc = docOfFx(@[pxLayer("blk", 3, 3, 4, 4, 0, 0, 0,
+    extra = @[("lfx2", fx)])], 7, 7)
+  check renderDocument(doc).getPixel(1, 1).a == 0
+
+test "disabled stroke paints nothing":
+  var fr = newDescriptor("FrFX")
+  discard fr.add("enab", boolValue(false))
+  var top = newDescriptor("null")
+  discard top.add("FrFX", descriptorValue(fr))
+  var w = initWriter()
+  w.putU32(0)
+  w.putU32(16)
+  w.writeDescriptorBody(top)
+  let s = w.toString()
+  let fx = spanBytes(Span(src: newStringSource(s), start: 0, stop: s.len))
+  let doc = docOfFx(@[pxLayer("blk", 3, 3, 4, 4, 0, 0, 0,
+    extra = @[("lfx2", fx)])], 7, 7)
+  check renderDocument(doc).getPixel(1, 1).a == 0
