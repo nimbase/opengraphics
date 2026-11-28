@@ -194,8 +194,8 @@ compositor catching up with the model, plus write-side authoring.
   modern, curves, exposure, channel mixer, black & white, photo filter,
   gradient map, color balance, selective color, hue/saturation, vibrance;
   color lookup stays transparent, its profile payload carries no table)
-- [ ] Smart-filter stacks evaluated (params are parsed; `FEid`/`FXid` caches
-  are preserved raw today)
+- [ ] Smart-filter stacks evaluated (params are parsed; `FEid`/`FXid` envelope
+  parsed — placed id, rect, depth — planes stay raw until evaluation exists)
 - [ ] Gradient/pattern fills regenerated from descriptors
 - [ ] Knockout (`knko` is parsed, not applied) and a bitmap-1 polarity oracle
   against Photoshop-written bytes
