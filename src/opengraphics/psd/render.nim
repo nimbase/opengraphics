@@ -1767,6 +1767,34 @@ proc applyOuterGlows*(doc: Document, index: int, li: LayerImage,
         compositeOver(dp, src, smode, op, 255)
         canvas.setPixel(x, y, dp)
 
+proc applyColorOverlays*(doc: Document, index: int, li: var LayerImage) =
+  ## Tint one layer's pixels in place with its enabled color overlays, first
+  ## listed on top. RGB only, alpha preserved: the layer's own blend path
+  ## below handles opacity, masks and coverage exactly as before.
+  let fx = effectsOf(doc.layers()[index])
+  if fx.isNone or not fx.get().master: return
+  if li.img.isEmpty(): return
+  for i in countdown(fx.get().effects.high, 0):
+    let e = fx.get().effects[i]
+    if e.kind != ekColorOverlay or not e.common.enabled: continue
+    let smode =
+      if e.common.blend.len == 0: bmNormal
+      else: effectBlendModeFromKey(e.common.blend)
+    let op = clamp(int(round(float64(e.common.opacity) * 255.0)), 0, 255)
+    if op <= 0: continue
+    let sr = uint8(clamp(int(round(float64(e.overlayColor[0]))), 0, 255))
+    let sg = uint8(clamp(int(round(float64(e.overlayColor[1]))), 0, 255))
+    let sb = uint8(clamp(int(round(float64(e.overlayColor[2]))), 0, 255))
+    for y in 0 ..< li.img.height:
+      for x in 0 ..< li.img.width:
+        var px = li.img.getPixel(x, y)
+        if px.a == 0: continue
+        let bl = blendRgb(smode, Rgba(r: sr, g: sg, b: sb, a: 255), px)
+        px.r = uint8(int(px.r) + (int(bl.r) - int(px.r)) * op div 255)
+        px.g = uint8(int(px.g) + (int(bl.g) - int(px.g)) * op div 255)
+        px.b = uint8(int(px.b) + (int(bl.b) - int(px.b)) * op div 255)
+        li.img.setPixel(x, y, px)
+
 proc groupIsIsolated(l: LayerRecord): bool =
   ## Whether a group's children are composited as a unit rather than blended
   ## straight into the backdrop beneath the group.
@@ -1818,7 +1846,8 @@ proc renderSiblings(doc: Document, nodes: seq[LayerNode], canvas: var ImageBuf,
       if n.layer.isAdjustmentLayer():
         applyAdjustmentLayer(doc, idx, canvas, groupOpacity, base)
         continue
-      let li = doc.layerImage(idx)
+      var li = doc.layerImage(idx)
+      applyColorOverlays(doc, idx, li)
       applyDropShadows(doc, idx, li, canvas, groupOpacity, base)
       applyOuterGlows(doc, idx, li, canvas, groupOpacity, base)
       blendLayerOnto(doc, idx, li, canvas, groupOpacity, base)

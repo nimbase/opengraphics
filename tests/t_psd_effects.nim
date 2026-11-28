@@ -143,6 +143,32 @@ suite "effects: lfx2 descriptor":
     check not e.glowPrecise
     check not e.glowGradient
 
+  test "color overlay parses its paint":
+    var so = newDescriptor("SoFi")
+    discard so.add("enab", boolValue(true))
+    discard so.add("Md  ", enumValue("BlnM", "Mltp"))
+    discard so.add("Opct", unitFloatValue("#Prc", 75.0))
+    var clr = newDescriptor("RGBC")
+    discard clr.add("Rd  ", doubleValue(10.0))
+    discard clr.add("Grn ", doubleValue(20.0))
+    discard clr.add("Bl  ", doubleValue(30.0))
+    discard so.add("Clr ", descriptorValue(clr))
+    var d = newDescriptor("null")
+    discard d.add("SoFi", descriptorValue(so))
+    let e = parseLfx2(lfx2Payload(d)).get().effects[0]
+    check e.kind == ekColorOverlay
+    check e.overlayColor == [10.0f32, 20.0f32, 30.0f32]
+    check e.common.blend == "Mltp"
+    check abs(e.common.opacity - 0.75f32) < 1e-6
+
+  test "color overlay defaults to black":
+    var so = newDescriptor("SoFi")
+    discard so.add("enab", boolValue(true))
+    var d = newDescriptor("null")
+    discard d.add("SoFi", descriptorValue(so))
+    let e = parseLfx2(lfx2Payload(d)).get().effects[0]
+    check e.overlayColor == [0.0f32, 0.0f32, 0.0f32]
+
   test "short payload stays none, not a crash":
     check parseLfx2(Span(src: newStringSource("\x00\x01"),
       start: 0, stop: 2)).isNone

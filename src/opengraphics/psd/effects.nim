@@ -48,8 +48,10 @@ type
       glowRange*: float32 ## 0..1 (`Inpr` percent, default 50)
       glowColor*: array[3, float32] ## 0..255 RGB (`Clr `, black when absent)
       glowGradient*: bool ## `Grad` paint present; gradient glows stay unpainted
-    of ekBevelEmboss, ekSatin, ekColorOverlay, ekGradientOverlay,
-       ekPatternOverlay, ekStroke, ekUnknown:
+    of ekColorOverlay:
+      overlayColor*: array[3, float32] ## 0..255 RGB (`Clr `, black when absent)
+    of ekBevelEmboss, ekSatin, ekGradientOverlay,
+        ekPatternOverlay, ekStroke, ekUnknown:
       discard
 
 const
@@ -140,6 +142,14 @@ proc parseOne(key: string, d: Descriptor): Option[Effect] =
       glowRange: numOf(d, "Inpr", 50.0) / 100.0f32,
       glowColor: col,
       glowGradient: d.get("Grad").isSome))
+  of ekColorOverlay:
+    var col = [0.0f32, 0.0f32, 0.0f32]
+    let cd = d.getDescriptor("Clr ")
+    if cd.isSome and cd.get().classId.asString() == "RGBC":
+      let cc = cd.get()
+      col = [cc.getDouble("Rd  ", 0.0).float32,
+        cc.getDouble("Grn ", 0.0).float32, cc.getDouble("Bl  ", 0.0).float32]
+    some(Effect(raw: d, key: key, kind: k, common: c, overlayColor: col))
   else:
     some(Effect(raw: d, key: key, kind: k))
 

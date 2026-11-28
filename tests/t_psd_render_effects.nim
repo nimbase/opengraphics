@@ -236,3 +236,103 @@ test "disabled glow paints nothing":
   let doc = docOfFx(@[pxLayer("blk", 0, 0, 1, 1, 0, 0, 0,
     extra = @[("lfx2", fx)])], 3, 1)
   check renderDocument(doc).getPixel(1, 0).a == 0
+
+# --- color overlay --------------------------------------------------------------
+
+proc overlayFx(color: array[3, float64], opacity = 100.0,
+    blend = "Nrml", enabled = true, master = true): seq[byte] =
+  var so = newDescriptor("SoFi")
+  discard so.add("enab", boolValue(enabled))
+  discard so.add("Md  ", enumValue("BlnM", blend))
+  discard so.add("Opct", unitFloatValue("#Prc", opacity))
+  var clr = newDescriptor("RGBC")
+  discard clr.add("Rd  ", doubleValue(color[0]))
+  discard clr.add("Grn ", doubleValue(color[1]))
+  discard clr.add("Bl  ", doubleValue(color[2]))
+  discard so.add("Clr ", descriptorValue(clr))
+  var top = newDescriptor("null")
+  if not master:
+    discard top.add("masterFXSwitch", boolValue(false))
+  discard top.add("SoFi", descriptorValue(so))
+  var w = initWriter()
+  w.putU32(0)
+  w.putU32(16)
+  w.writeDescriptorBody(top)
+  let s = w.toString()
+  spanBytes(Span(src: newStringSource(s), start: 0, stop: s.len))
+
+proc overlayMulti(items: seq[Descriptor]): seq[byte] =
+  var top = newDescriptor("null")
+  var vals: seq[Value] = @[]
+  for it in items:
+    vals.add(descriptorValue(it))
+  discard top.add("solidFillMulti", listValue(vals))
+  var w = initWriter()
+  w.putU32(0)
+  w.putU32(16)
+  w.writeDescriptorBody(top)
+  let s = w.toString()
+  spanBytes(Span(src: newStringSource(s), start: 0, stop: s.len))
+
+proc overlayItem(color: array[3, float64], opacity = 100.0,
+    blend = "Nrml"): Descriptor =
+  var so = newDescriptor("SoFi")
+  discard so.add("enab", boolValue(true))
+  discard so.add("Md  ", enumValue("BlnM", blend))
+  discard so.add("Opct", unitFloatValue("#Prc", opacity))
+  var clr = newDescriptor("RGBC")
+  discard clr.add("Rd  ", doubleValue(color[0]))
+  discard clr.add("Grn ", doubleValue(color[1]))
+  discard clr.add("Bl  ", doubleValue(color[2]))
+  discard so.add("Clr ", descriptorValue(clr))
+  so
+
+test "color overlay replaces opaque pixels":
+  let fx = overlayFx([0.0, 0, 255])
+  let doc = docOfFx(@[pxLayer("red", 0, 0, 1, 1, 255, 0, 0,
+    extra = @[("lfx2", fx)])], 1, 1)
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 255, a: 255)
+
+test "color overlay scales with its opacity":
+  let fx = overlayFx([0.0, 0, 255], 50.0)
+  let doc = docOfFx(@[pxLayer("red", 0, 0, 1, 1, 255, 0, 0,
+    extra = @[("lfx2", fx)])], 1, 1)
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 127, g: 0, b: 128, a: 255)
+
+test "color overlay keeps the layer alpha":
+  let fx = overlayFx([0.0, 0, 255])
+  let doc = docOfFx(@[pxLayer("red", 0, 0, 1, 1, 255, 0, 0, 128,
+    extra = @[("lfx2", fx)])], 1, 1)
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 255, a: 128)
+
+test "color overlay blends with its mode":
+  let fx = overlayFx([0.0, 0, 0], blend = "Mltp")
+  let doc = docOfFx(@[pxLayer("red", 0, 0, 1, 1, 255, 0, 0,
+    extra = @[("lfx2", fx)])], 1, 1)
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 0, g: 0, b: 0, a: 255)
+
+test "first listed overlay paints on top":
+  let fx = overlayMulti(@[overlayItem([255.0, 0, 0]),
+    overlayItem([0.0, 0, 255])])
+  let doc = docOfFx(@[pxLayer("wht", 0, 0, 1, 1, 255, 255, 255,
+    extra = @[("lfx2", fx)])], 1, 1)
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 255, g: 0, b: 0, a: 255)
+
+test "disabled overlay paints nothing":
+  let fx = overlayFx([0.0, 0, 255], enabled = false)
+  let doc = docOfFx(@[pxLayer("red", 0, 0, 1, 1, 255, 0, 0,
+    extra = @[("lfx2", fx)])], 1, 1)
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 255, g: 0, b: 0, a: 255)
+
+test "overlay master switch off paints nothing":
+  let fx = overlayFx([0.0, 0, 255], master = false)
+  let doc = docOfFx(@[pxLayer("red", 0, 0, 1, 1, 255, 0, 0,
+    extra = @[("lfx2", fx)])], 1, 1)
+  check renderDocument(doc).getPixel(0, 0) ==
+    Rgba(r: 255, g: 0, b: 0, a: 255)
