@@ -110,6 +110,39 @@ suite "effects: lfx2 descriptor":
     check e.angle == 90.0f32
     check e.useGlobalLight
 
+  test "outer glow parses paint spread range technique":
+    var gl = newDescriptor("OrGl")
+    discard gl.add("enab", boolValue(true))
+    var clr = newDescriptor("RGBC")
+    discard clr.add("Rd  ", doubleValue(255.0))
+    discard clr.add("Grn ", doubleValue(0.0))
+    discard clr.add("Bl  ", doubleValue(0.0))
+    discard gl.add("Clr ", descriptorValue(clr))
+    discard gl.add("Ckmt", doubleValue(40.0))
+    discard gl.add("Inpr", doubleValue(30.0))
+    discard gl.add("GlwT", enumValue("GlwT", "PrBL"))
+    var d = newDescriptor("null")
+    discard d.add("OrGl", descriptorValue(gl))
+    let e = parseLfx2(lfx2Payload(d)).get().effects[0]
+    check e.kind == ekOuterGlow
+    check e.glowColor == [255.0f32, 0.0f32, 0.0f32]
+    check abs(e.glowSpread - 0.4f32) < 1e-6
+    check abs(e.glowRange - 0.3f32) < 1e-6
+    check e.glowPrecise
+    check not e.glowGradient
+
+  test "outer glow defaults":
+    var gl = newDescriptor("OrGl")
+    discard gl.add("enab", boolValue(true))
+    var d = newDescriptor("null")
+    discard d.add("OrGl", descriptorValue(gl))
+    let e = parseLfx2(lfx2Payload(d)).get().effects[0]
+    check e.glowColor == [0.0f32, 0.0f32, 0.0f32]
+    check e.glowSpread == 0.0f32
+    check abs(e.glowRange - 0.5f32) < 1e-6
+    check not e.glowPrecise
+    check not e.glowGradient
+
   test "short payload stays none, not a crash":
     check parseLfx2(Span(src: newStringSource("\x00\x01"),
       start: 0, stop: 2)).isNone

@@ -138,3 +138,101 @@ test "master switch off paints nothing":
   let doc = docOfFx(@[pxLayer("blk", 0, 0, 1, 1, 0, 0, 0,
     extra = @[("lfx2", fx)])], 3, 1)
   check renderDocument(doc).getPixel(1, 0).a == 0
+
+# --- outer glow -----------------------------------------------------------------
+
+proc glowFx(size, spread, rng: float64, color: array[3, float64],
+    opacity = 100.0, blend = "", precise = false,
+    gradient = false): seq[byte] =
+  var gl = newDescriptor("OrGl")
+  discard gl.add("enab", boolValue(true))
+  if blend.len > 0:
+    discard gl.add("Md  ", enumValue("BlnM", blend))
+  if opacity >= 0.0:
+    discard gl.add("Opct", unitFloatValue("#Prc", opacity))
+  discard gl.add("blur", doubleValue(size))
+  discard gl.add("Ckmt", doubleValue(spread * 100.0))
+  discard gl.add("Inpr", doubleValue(rng * 100.0))
+  if precise:
+    discard gl.add("GlwT", enumValue("GlwT", "PrBL"))
+  var clr = newDescriptor("RGBC")
+  discard clr.add("Rd  ", doubleValue(color[0]))
+  discard clr.add("Grn ", doubleValue(color[1]))
+  discard clr.add("Bl  ", doubleValue(color[2]))
+  discard gl.add("Clr ", descriptorValue(clr))
+  if gradient:
+    discard gl.add("Grad", descriptorValue(newDescriptor("Grad")))
+  var top = newDescriptor("null")
+  discard top.add("OrGl", descriptorValue(gl))
+  var w = initWriter()
+  w.putU32(0)
+  w.putU32(16)
+  w.writeDescriptorBody(top)
+  let s = w.toString()
+  spanBytes(Span(src: newStringSource(s), start: 0, stop: s.len))
+
+test "outer glow hugs the shape":
+  let fx = glowFx(2, 0, 0.5, [0.0, 0, 0], blend = "Nrml")
+  let doc = docOfFx(@[pxLayer("blk", 2, 2, 3, 3, 0, 0, 0,
+    extra = @[("lfx2", fx)])], 5, 5)
+  let img = renderDocument(doc)
+  check img.getPixel(2, 2) == Rgba(r: 0, g: 0, b: 0, a: 255)
+  check img.getPixel(1, 2) == Rgba(r: 0, g: 0, b: 0, a: 17)
+  check img.getPixel(3, 2) == Rgba(r: 0, g: 0, b: 0, a: 17)
+  check img.getPixel(2, 1) == Rgba(r: 0, g: 0, b: 0, a: 17)
+  check img.getPixel(0, 0).a == 0
+
+test "outer glow spread reaches further":
+  let fx = glowFx(4, 0.5, 0.5, [0.0, 0, 0], blend = "Nrml")
+  let doc = docOfFx(@[pxLayer("blk", 3, 3, 4, 4, 0, 0, 0,
+    extra = @[("lfx2", fx)])], 7, 7)
+  let img = renderDocument(doc)
+  check img.getPixel(3, 3) == Rgba(r: 0, g: 0, b: 0, a: 255)
+  check img.getPixel(4, 3) == Rgba(r: 0, g: 0, b: 0, a: 255)
+  check img.getPixel(5, 3) == Rgba(r: 0, g: 0, b: 0, a: 255)
+  check img.getPixel(6, 3) == Rgba(r: 0, g: 0, b: 0, a: 159)
+
+test "screen glow blends with the backdrop":
+  # Same soft edge as the black glow (coverage 17/255): screened over blue
+  # at that strength gives dim magenta, opaque.
+  let fx = glowFx(2, 0, 0.5, [255.0, 0, 0], blend = "Scrn")
+  let doc = docOfFx(@[
+    pxLayer("blue", 0, 0, 1, 2, 0, 0, 255),
+    pxLayer("wht", 0, 0, 1, 1, 255, 255, 255, extra = @[("lfx2", fx)]),
+  ])
+  check renderDocument(doc).getPixel(1, 0) ==
+    Rgba(r: 17, g: 0, b: 255, a: 255)
+
+test "glow defaults to screen at 75 percent":
+  # No Md/Opct keys: the reference defaults apply and the neighbor glows.
+  let fx = glowFx(2, 0, 0.5, [0.0, 0, 0], opacity = -1.0)
+  let doc = docOfFx(@[pxLayer("blk", 0, 0, 1, 1, 0, 0, 0,
+    extra = @[("lfx2", fx)])], 3, 1)
+  check renderDocument(doc).getPixel(1, 0).a > 0
+
+test "precise glow stays unpainted":
+  let fx = glowFx(2, 0, 0.5, [0.0, 0, 0], blend = "Nrml", precise = true)
+  let doc = docOfFx(@[pxLayer("blk", 0, 0, 1, 1, 0, 0, 0,
+    extra = @[("lfx2", fx)])], 3, 1)
+  check renderDocument(doc).getPixel(1, 0).a == 0
+
+test "gradient glow stays unpainted":
+  let fx = glowFx(2, 0, 0.5, [0.0, 0, 0], blend = "Nrml", gradient = true)
+  let doc = docOfFx(@[pxLayer("blk", 0, 0, 1, 1, 0, 0, 0,
+    extra = @[("lfx2", fx)])], 3, 1)
+  check renderDocument(doc).getPixel(1, 0).a == 0
+
+test "disabled glow paints nothing":
+  var gl = newDescriptor("OrGl")
+  discard gl.add("enab", boolValue(false))
+  var top = newDescriptor("null")
+  discard top.add("OrGl", descriptorValue(gl))
+  var w = initWriter()
+  w.putU32(0)
+  w.putU32(16)
+  w.writeDescriptorBody(top)
+  let s = w.toString()
+  let fx = spanBytes(Span(src: newStringSource(s), start: 0, stop: s.len))
+  let doc = docOfFx(@[pxLayer("blk", 0, 0, 1, 1, 0, 0, 0,
+    extra = @[("lfx2", fx)])], 3, 1)
+  check renderDocument(doc).getPixel(1, 0).a == 0

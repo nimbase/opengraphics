@@ -41,6 +41,7 @@ import std/math
 import std/options
 
 import ./adjustments
+import ./descriptor
 import ./document
 import ./effects
 import ./error
@@ -1567,6 +1568,29 @@ proc shadowOffsetNim*(angleDeg, dist: float64): tuple[dx, dy: int] =
   let a = angleDeg * PI / 180.0
   (int(round(-cos(a) * dist)), int(round(sin(a) * dist)))
 
+proc glowSofterFloorNim*(size: float64): float64 =
+  ## Coverage a straight edge gives the tent's outermost pixel: the squared
+  ## end tap when the box ends in partial taps, else zero.
+  let b = boxWeightsNim(size)
+  if b.len < 2: return 0.0
+  let e = b[^1]
+  let nx = b[^2]
+  if e < 0.999 * nx: e * e else: 0.0
+
+proc glowTransferNim*(v, size, spread, rng: float64): float64 =
+  ## Outer-glow coverage transfer for the linear contour. No spread uses the
+  ## measured soft-edge table (floor plus range levels); spread uses the
+  ## range stretch. Custom contours are approximated as linear.
+  var rr = if rng != rng: 1.0 else: clamp(rng, 0.01, 1.0)
+  if spread == 0.0:
+    let levels = round(rr * 255.0) / 255.0
+    let floor = glowSofterFloorNim(size)
+    let full = levels * (1.0 - floor)
+    if full <= 0.0: return 0.0
+    clamp((v - floor) / full, 0.0, 1.0)
+  else:
+    min(v / rr, 1.0)
+
 proc applyDropShadows*(doc: Document, index: int, li: LayerImage,
     canvas: var ImageBuf, groupOpacity: int, base: ClipBase) =
   ## Paint enabled drop shadows behind one layer, bottom of the stack first.
@@ -1657,6 +1681,92 @@ proc applyDropShadows*(doc: Document, index: int, li: LayerImage,
         compositeOver(dp, src, smode, op, 255)
         canvas.setPixel(x, y, dp)
 
+proc applyOuterGlows*(doc: Document, index: int, li: LayerImage,
+    canvas: var ImageBuf, groupOpacity: int, base: ClipBase) =
+  ## Paint enabled outer glows behind one layer, bottom of the stack first.
+  ## Only solid-color Softer glows with a linear-approximated contour render;
+  ## precise technique and gradient paint stay unpainted for now.
+  let layer = doc.layers()[index]
+  let fx = effectsOf(layer)
+  if fx.isNone or not fx.get().master: return
+  let opacity = layer.opacity * groupOpacity div 255
+  if opacity <= 0 or canvas.isEmpty(): return
+  let liw = li.img.width
+  let lih = li.img.height
+  if liw <= 0 or lih <= 0: return
+  let r = layer.rect
+  let mask = if layer.layerMask().isSome or layer.hasVectorMask:
+               initMaskSampler(doc, index)
+             else: MaskSampler()
+  let clipped = layer.clipping != 0
+  let effects = fx.get().effects
+  for i in countdown(effects.high, 0):
+    let e = effects[i]
+    if e.kind != ekOuterGlow or not e.common.enabled: continue
+    if e.glowPrecise or e.glowGradient: continue
+    let spreadR = int(round(float64(e.glowBlur) * float64(e.glowSpread)))
+    let blurW = float64(e.glowBlur) * (1.0 - float64(e.glowSpread))
+    let (blurR, _) = tentKernelNim(blurW)
+    let m = blurR + spreadR + 2
+    let x0 = max(int(r.left) - m, 0)
+    let y0 = max(int(r.top) - m, 0)
+    let x1 = min(int(r.right) + m, canvas.width)
+    let y1 = min(int(r.bottom) + m, canvas.height)
+    if x1 <= x0 or y1 <= y0: continue
+    let pw = x1 - x0
+    let ph = y1 - y0
+    var plane = newSeq[float64](pw * ph)
+    for y in y0 ..< y1:
+      for x in x0 ..< x1:
+        if x < int(r.left) or x >= int(r.right) or y < int(r.top) or
+            y >= int(r.bottom):
+          continue
+        let a = int(li.img.getPixel(x - int(r.left), y - int(r.top)).a)
+        if a <= 0: continue
+        var mv = 255
+        if mask.present: mv = mask.sampleAt(x, y)
+        if mv <= 0: continue
+        plane[(y - y0) * pw + (x - x0)] =
+          float64(a) * float64(mv) / (255.0 * 255.0)
+    dilatePlaneNim(plane, pw, ph, spreadR)
+    blurPlaneNim(plane, pw, ph, blurW)
+    let size = float64(e.glowBlur)
+    let spread = float64(e.glowSpread)
+    let rng = float64(e.glowRange)
+    for y in y0 ..< y1:
+      for x in x0 ..< x1:
+        plane[(y - y0) * pw + (x - x0)] = glowTransferNim(
+          plane[(y - y0) * pw + (x - x0)], size, spread, rng)
+    let smode =
+      if e.common.blend.len == 0: bmScreen
+      else: effectBlendModeFromKey(e.common.blend)
+    let dissolve = smode == bmDissolve
+    let op01 =
+      if e.raw.get("Opct").isNone: 0.75f32 else: e.common.opacity
+    let sr = uint8(clamp(int(round(float64(e.glowColor[0]))), 0, 255))
+    let sg = uint8(clamp(int(round(float64(e.glowColor[1]))), 0, 255))
+    let sb = uint8(clamp(int(round(float64(e.glowColor[2]))), 0, 255))
+    for y in y0 ..< y1:
+      for x in x0 ..< x1:
+        let cov = plane[(y - y0) * pw + (x - x0)]
+        if cov <= 0.0: continue
+        if clipped:
+          if not base.has or x < int(base.rect.left) or
+              x >= int(base.rect.right) or y < int(base.rect.top) or
+              y >= int(base.rect.bottom):
+            continue
+          let bpx = base.img.getPixel(x - int(base.rect.left),
+            y - int(base.rect.top))
+          if bpx.a == 0: continue
+        if dissolve and not dissolveKeeps(x, y, opacity): continue
+        let op = clamp(int(round(cov * float64(op01) *
+          float64(opacity))), 0, 255)
+        if op <= 0: continue
+        var dp = canvas.getPixel(x, y)
+        var src = Rgba(r: sr, g: sg, b: sb, a: 255)
+        compositeOver(dp, src, smode, op, 255)
+        canvas.setPixel(x, y, dp)
+
 proc groupIsIsolated(l: LayerRecord): bool =
   ## Whether a group's children are composited as a unit rather than blended
   ## straight into the backdrop beneath the group.
@@ -1710,6 +1820,7 @@ proc renderSiblings(doc: Document, nodes: seq[LayerNode], canvas: var ImageBuf,
         continue
       let li = doc.layerImage(idx)
       applyDropShadows(doc, idx, li, canvas, groupOpacity, base)
+      applyOuterGlows(doc, idx, li, canvas, groupOpacity, base)
       blendLayerOnto(doc, idx, li, canvas, groupOpacity, base)
       if n.layer.clipping == 0 and not li.img.isEmpty():
         base = ClipBase(has: true, rect: n.layer.rect, img: li.img)
