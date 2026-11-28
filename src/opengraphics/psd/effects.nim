@@ -10,6 +10,7 @@
 ## `common` carries enabled/blend/opacity; the rest is per-kind scalars.
 ## Nothing here rewrites a file; it only reads.
 
+import std/math
 import std/options
 
 import ./descriptor
@@ -37,6 +38,9 @@ type
       distance*, size*, blur*: float32
       angle*: float32
       useGlobalLight*: bool
+      spread*: float32 ## 0..1 choke/spread (`Ckmt` percent)
+      color*: array[3, float32] ## 0..255 RGB (`Clr `, black when absent)
+      knocksOut*: bool ## `layerConceals`, drop shadows only
     of ekOuterGlow, ekInnerGlow:
       glowSize*, glowBlur*: float32
     of ekBevelEmboss, ekSatin, ekColorOverlay, ekGradientOverlay,
@@ -100,10 +104,21 @@ proc parseOne(key: string, d: Descriptor): Option[Effect] =
   let c = commonOf(d)
   case k
   of ekDropShadow, ekInnerShadow:
+    var col = [0.0f32, 0.0f32, 0.0f32]
+    let cd = d.getDescriptor("Clr ")
+    if cd.isSome and cd.get().classId.asString() == "RGBC":
+      let cc = cd.get()
+      col = [cc.getDouble("Rd  ", 0.0).float32,
+        cc.getDouble("Grn ", 0.0).float32, cc.getDouble("Bl  ", 0.0).float32]
     some(Effect(raw: d, key: key, kind: k, common: c,
-      distance: numOf(d, "Dstn"), size: numOf(d, "blur", numOf(d, "Sz  ")),
-      blur: numOf(d, "blur"), angle: numOf(d, "Angl"),
-      useGlobalLight: d.getBool("useGlobalAngle", true)))
+      distance: numOf(d, "Dstn", 5.0),
+      size: numOf(d, "blur", numOf(d, "Sz  ", 5.0)),
+      blur: numOf(d, "blur", 5.0),
+      angle: numOf(d, "Angl", 90.0),
+      useGlobalLight: d.getBool("uglg", d.getBool("useGlobalAngle", true)),
+      spread: clamp(numOf(d, "Ckmt") / 100.0f32, 0.0f32, 1.0f32),
+      color: col,
+      knocksOut: k == ekDropShadow and d.getBool("layerConceals", true)))
   of ekOuterGlow, ekInnerGlow:
     some(Effect(raw: d, key: key, kind: k, common: c,
       glowSize: numOf(d, "Sz  "), glowBlur: numOf(d, "blur")))

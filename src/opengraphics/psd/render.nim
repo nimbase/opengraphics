@@ -42,6 +42,7 @@ import std/options
 
 import ./adjustments
 import ./document
+import ./effects
 import ./error
 import ./layers
 import ./pixels
@@ -1455,6 +1456,207 @@ proc applyAdjustmentLayer*(doc: Document, index: int, canvas: var ImageBuf,
       compositeOver(dp, src, mode, opacity, mv)
       canvas.setPixel(x, y, dp)
 
+# --- layer effects: drop shadows ------------------------------------------------
+#
+# Exterior effects paint behind the layer, from the layer's masked alpha:
+# shifted by the offset, dilated by the spread, blurred by the size, then
+# blended in the shadow's own color, mode and opacity. The layer paints over
+# the result, which knocks the shadow out beneath opaque pixels; an explicit
+# knock-out cut handles the translucent remainder for Normal layers.
+# Contour, noise and global-light substitution stay future work: the stored
+# angle is already resolved at write time, so static files render correctly.
+
+proc effectBlendModeFromKey*(key: string): BlendMode =
+  ## Map an effect `Md` key to a blend mode. Effect keys differ in case
+  ## from layer keys ("Mltp" vs "mul "); unknown keys fall back to Normal.
+  case key
+  of "Nrml", "normal": bmNormal
+  of "Dslv", "dissolve": bmDissolve
+  of "Drkn", "darken": bmDarken
+  of "Mltp", "multiply": bmMultiply
+  of "CBrn", "colorBurn": bmColorBurn
+  of "linearBurn": bmLinearBurn
+  of "darkerColor": bmDarkerColor
+  of "Lghn", "lighten": bmLighten
+  of "Scrn", "screen": bmScreen
+  of "CDdg", "colorDodge": bmColorDodge
+  of "linearDodge": bmLinearDodge
+  of "lighterColor": bmLighterColor
+  of "Ovrl", "overlay": bmOverlay
+  of "SftL", "softLight": bmSoftLight
+  of "HrdL", "hardLight": bmHardLight
+  of "vividLight": bmVividLight
+  of "linearLight": bmLinearLight
+  of "pinLight": bmPinLight
+  of "hardMix": bmHardMix
+  of "Dfrn", "difference": bmDifference
+  of "Xclu", "exclusion": bmExclusion
+  of "blendSubtraction": bmSubtract
+  of "blendDivide": bmDivide
+  of "H   ", "hue": bmHue
+  of "Strt", "saturation": bmSaturation
+  of "Clr ", "color": bmColor
+  of "Lmns", "luminosity": bmLuminosity
+  else: bmNormal
+
+proc boxWeightsNim(w: float64): seq[float64] =
+  ## Normalized weights of a centered fractional-width box: tap `i` gets
+  ## the overlap of `[i-1/2, i+1/2]` with `[-w/2, w/2]`.
+  var ww = if w != w: 1.0 else: clamp(w, 1.0, 512.0)
+  let half = ww / 2.0
+  let r = max(int(ceil(half - 0.5)), 0)
+  var sum = 0.0
+  for i in -r .. r:
+    let v = max(min(float64(i) + 0.5, half) - max(float64(i) - 0.5, -half),
+      0.0)
+    result.add(v)
+    sum += v
+  for k in 0 ..< result.len:
+    result[k] /= sum
+
+proc tentKernelNim*(w: float64): tuple[radius: int, taps: seq[float64]] =
+  ## Two box passes make a tent: the kernel is the box convolved with
+  ## itself. Width 1 is the identity (radius 0).
+  let b = boxWeightsNim(w)
+  var t = newSeq[float64](b.len * 2 - 1)
+  for i, x in b:
+    for j, y in b:
+      t[i + j] += x * y
+  ((t.len - 1) div 2, t)
+
+proc blurPlaneNim*(plane: var seq[float64], w, h: int, size: float64) =
+  ## Two separable box passes (a tent), zero outside the plane.
+  let (radius, taps) = tentKernelNim(size)
+  if radius == 0 or plane.len == 0: return
+  var tmp = newSeq[float64](w * h)
+  for y in 0 ..< h:
+    for x in 0 ..< w:
+      var acc = 0.0
+      for i, kv in taps:
+        let xx = x + i - radius
+        if xx >= 0 and xx < w: acc += plane[y * w + xx] * kv
+      tmp[y * w + x] = acc
+  for x in 0 ..< w:
+    for y in 0 ..< h:
+      var acc = 0.0
+      for i, kv in taps:
+        let yy = y + i - radius
+        if yy >= 0 and yy < h: acc += tmp[yy * w + x] * kv
+      plane[y * w + x] = acc
+
+proc dilatePlaneNim*(plane: var seq[float64], w, h: int, radius: int) =
+  ## Box max-filter dilation, separable row then column passes. The plane is
+  ## zero past the effect's reach, so clamped edges match zero-fill.
+  if radius <= 0 or plane.len == 0: return
+  var tmp = newSeq[float64](w * h)
+  for y in 0 ..< h:
+    for x in 0 ..< w:
+      var m = 0.0
+      for dx in -radius .. radius:
+        m = max(m, plane[y * w + clamp(x + dx, 0, w - 1)])
+      tmp[y * w + x] = m
+  for x in 0 ..< w:
+    for y in 0 ..< h:
+      var m = 0.0
+      for dy in -radius .. radius:
+        m = max(m, tmp[clamp(y + dy, 0, h - 1) * w + x])
+      plane[y * w + x] = m
+
+proc shadowOffsetNim*(angleDeg, dist: float64): tuple[dx, dy: int] =
+  ## Integer pixel offset of a distance at an angle in degrees.
+  let a = angleDeg * PI / 180.0
+  (int(round(-cos(a) * dist)), int(round(sin(a) * dist)))
+
+proc applyDropShadows*(doc: Document, index: int, li: LayerImage,
+    canvas: var ImageBuf, groupOpacity: int, base: ClipBase) =
+  ## Paint enabled drop shadows behind one layer, bottom of the stack first.
+  let layer = doc.layers()[index]
+  let fx = effectsOf(layer)
+  if fx.isNone or not fx.get().master: return
+  let opacity = layer.opacity * groupOpacity div 255
+  if opacity <= 0 or canvas.isEmpty(): return
+  let liw = li.img.width
+  let lih = li.img.height
+  if liw <= 0 or lih <= 0: return
+  let r = layer.rect
+  let mask = if layer.layerMask().isSome or layer.hasVectorMask:
+               initMaskSampler(doc, index)
+             else: MaskSampler()
+  let clipped = layer.clipping != 0
+  let layerMode = blendModeFromKey(layer.blendMode)
+  let effects = fx.get().effects
+  for i in countdown(effects.high, 0):
+    let e = effects[i]
+    if e.kind != ekDropShadow or not e.common.enabled: continue
+    let (dx, dy) = shadowOffsetNim(float64(e.angle), float64(e.distance))
+    let spreadR = int(round(float64(e.size) * float64(e.spread)))
+    let blurW = float64(e.size) * (1.0 - float64(e.spread))
+    let (blurR, _) = tentKernelNim(blurW)
+    let m = abs(dx) + abs(dy) + spreadR + blurR + 2
+    let x0 = max(int(r.left) - m, 0)
+    let y0 = max(int(r.top) - m, 0)
+    let x1 = min(int(r.right) + m, canvas.width)
+    let y1 = min(int(r.bottom) + m, canvas.height)
+    if x1 <= x0 or y1 <= y0: continue
+    let pw = x1 - x0
+    let ph = y1 - y0
+    var plane = newSeq[float64](pw * ph)
+    for y in y0 ..< y1:
+      for x in x0 ..< x1:
+        let sx = x - dx
+        let sy = y - dy
+        if sx < int(r.left) or sx >= int(r.right) or sy < int(r.top) or
+            sy >= int(r.bottom):
+          continue
+        let a = int(li.img.getPixel(sx - int(r.left), sy - int(r.top)).a)
+        if a <= 0: continue
+        var mv = 255
+        if mask.present: mv = mask.sampleAt(sx, sy)
+        if mv <= 0: continue
+        plane[(y - y0) * pw + (x - x0)] =
+          float64(a) * float64(mv) / (255.0 * 255.0)
+    dilatePlaneNim(plane, pw, ph, spreadR)
+    blurPlaneNim(plane, pw, ph, blurW)
+    if e.knocksOut and layerMode in {bmNormal, bmDissolve, bmPassThrough}:
+      # Fill is always opaque here, so a Normal layer knocks the shadow out
+      # wholly beneath its shape; other modes blend with it, shadow and all.
+      for y in y0 ..< y1:
+        for x in x0 ..< x1:
+          var s = 0.0
+          if x >= int(r.left) and x < int(r.right) and y >= int(r.top) and
+              y < int(r.bottom):
+            let a = int(li.img.getPixel(x - int(r.left), y - int(r.top)).a)
+            if a > 0:
+              var mv = 255
+              if mask.present: mv = mask.sampleAt(x, y)
+              s = float64(a) * float64(mv) / (255.0 * 255.0)
+          plane[(y - y0) * pw + (x - x0)] *= 1.0 - s
+    let smode = effectBlendModeFromKey(e.common.blend)
+    let dissolve = smode == bmDissolve
+    let sr = uint8(clamp(int(round(float64(e.color[0]))), 0, 255))
+    let sg = uint8(clamp(int(round(float64(e.color[1]))), 0, 255))
+    let sb = uint8(clamp(int(round(float64(e.color[2]))), 0, 255))
+    for y in y0 ..< y1:
+      for x in x0 ..< x1:
+        let cov = plane[(y - y0) * pw + (x - x0)]
+        if cov <= 0.0: continue
+        if clipped:
+          if not base.has or x < int(base.rect.left) or
+              x >= int(base.rect.right) or y < int(base.rect.top) or
+              y >= int(base.rect.bottom):
+            continue
+          let bpx = base.img.getPixel(x - int(base.rect.left),
+            y - int(base.rect.top))
+          if bpx.a == 0: continue
+        if dissolve and not dissolveKeeps(x, y, opacity): continue
+        let op = clamp(int(round(cov * float64(e.common.opacity) *
+          float64(opacity))), 0, 255)
+        if op <= 0: continue
+        var dp = canvas.getPixel(x, y)
+        var src = Rgba(r: sr, g: sg, b: sb, a: 255)
+        compositeOver(dp, src, smode, op, 255)
+        canvas.setPixel(x, y, dp)
+
 proc groupIsIsolated(l: LayerRecord): bool =
   ## Whether a group's children are composited as a unit rather than blended
   ## straight into the backdrop beneath the group.
@@ -1507,6 +1709,7 @@ proc renderSiblings(doc: Document, nodes: seq[LayerNode], canvas: var ImageBuf,
         applyAdjustmentLayer(doc, idx, canvas, groupOpacity, base)
         continue
       let li = doc.layerImage(idx)
+      applyDropShadows(doc, idx, li, canvas, groupOpacity, base)
       blendLayerOnto(doc, idx, li, canvas, groupOpacity, base)
       if n.layer.clipping == 0 and not li.img.isEmpty():
         base = ClipBase(has: true, rect: n.layer.rect, img: li.img)

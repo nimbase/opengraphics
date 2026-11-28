@@ -81,6 +81,35 @@ suite "effects: lfx2 descriptor":
     check r.isSome
     check r.get().effects.len == 2
 
+  test "drop shadow parses color spread knockout":
+    var sh = newDescriptor("DrSh")
+    discard sh.add("enab", boolValue(true))
+    var clr = newDescriptor("RGBC")
+    discard clr.add("Rd  ", doubleValue(10.0))
+    discard clr.add("Grn ", doubleValue(20.0))
+    discard clr.add("Bl  ", doubleValue(30.0))
+    discard sh.add("Clr ", descriptorValue(clr))
+    discard sh.add("Ckmt", doubleValue(25.0))
+    discard sh.add("layerConceals", boolValue(false))
+    var d = newDescriptor("null")
+    discard d.add("DrSh", descriptorValue(sh))
+    let e = parseLfx2(lfx2Payload(d)).get().effects[0]
+    check e.color == [10.0f32, 20.0f32, 30.0f32]
+    check abs(e.spread - 0.25f32) < 1e-6
+    check not e.knocksOut
+
+  test "drop shadow color spread knockout defaults":
+    var sh = newDescriptor("DrSh")
+    discard sh.add("enab", boolValue(true))
+    var d = newDescriptor("null")
+    discard d.add("DrSh", descriptorValue(sh))
+    let e = parseLfx2(lfx2Payload(d)).get().effects[0]
+    check e.color == [0.0f32, 0.0f32, 0.0f32]
+    check e.spread == 0.0f32
+    check e.knocksOut
+    check e.angle == 90.0f32
+    check e.useGlobalLight
+
   test "short payload stays none, not a crash":
     check parseLfx2(Span(src: newStringSource("\x00\x01"),
       start: 0, stop: 2)).isNone
