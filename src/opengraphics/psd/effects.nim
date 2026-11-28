@@ -83,20 +83,22 @@ proc kindFor*(key: string): EffectKind =
   of "FrFX": ekStroke
   else: ekUnknown
 
-proc commonOf(d: Descriptor): FxCommon =
+proc commonOf(d: Descriptor, defBlend = "", defOpacity = 1.0f32): FxCommon =
   result.enabled = d.getBool("enab", true)
   let m = d.get("Md  ")
   if m.isSome and m.get().kind == vEnumerated:
     result.blend = m.get().valueId.asString()
+  else:
+    result.blend = defBlend
   let o = d.get("Opct")
   if o.isSome:
     case o.get().kind
     of vUnitFloat: result.opacity = float32(o.get().floatUnitValue / 100.0)
     of vDouble: result.opacity = float32(o.get().double / 100.0)
     of vInteger: result.opacity = float32(o.get().integer) / 100.0f32
-    else: result.opacity = 1.0f32
+    else: result.opacity = defOpacity
   else:
-    result.opacity = 1.0f32
+    result.opacity = defOpacity
 
 proc numOf(d: Descriptor, key: string, default = 0.0f32): float32 =
   let v = d.get(key)
@@ -109,7 +111,11 @@ proc numOf(d: Descriptor, key: string, default = 0.0f32): float32 =
 
 proc parseOne(key: string, d: Descriptor): Option[Effect] =
   let k = kindFor(key)
-  let c = commonOf(d)
+  let c =
+    if k in {ekDropShadow, ekInnerShadow, ekOuterGlow, ekInnerGlow}:
+      commonOf(d, "Mltp", 0.75f32)
+    else:
+      commonOf(d)
   case k
   of ekDropShadow, ekInnerShadow:
     var col = [0.0f32, 0.0f32, 0.0f32]
@@ -122,7 +128,7 @@ proc parseOne(key: string, d: Descriptor): Option[Effect] =
       distance: numOf(d, "Dstn", 5.0),
       size: numOf(d, "blur", numOf(d, "Sz  ", 5.0)),
       blur: numOf(d, "blur", 5.0),
-      angle: numOf(d, "Angl", 90.0),
+      angle: numOf(d, "lagl", numOf(d, "Angl", 120.0)),
       useGlobalLight: d.getBool("uglg", d.getBool("useGlobalAngle", true)),
       spread: clamp(numOf(d, "Ckmt") / 100.0f32, 0.0f32, 1.0f32),
       color: col,

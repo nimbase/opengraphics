@@ -107,8 +107,25 @@ suite "effects: lfx2 descriptor":
     check e.color == [0.0f32, 0.0f32, 0.0f32]
     check e.spread == 0.0f32
     check e.knocksOut
-    check e.angle == 90.0f32
+    check e.angle == 120.0f32
     check e.useGlobalLight
+    check e.common.blend == "Mltp"
+    check abs(e.common.opacity - 0.75f32) < 1e-6
+
+  test "drop shadow reads the local angle":
+    # Real files carry it in `lagl`; a legacy `Angl` still works.
+    var sh = newDescriptor("DrSh")
+    discard sh.add("enab", boolValue(true))
+    discard sh.add("lagl", unitFloatValue("#Ang", 30.0))
+    var d = newDescriptor("null")
+    discard d.add("DrSh", descriptorValue(sh))
+    check parseLfx2(lfx2Payload(d)).get().effects[0].angle == 30.0f32
+    var sh2 = newDescriptor("DrSh")
+    discard sh2.add("enab", boolValue(true))
+    discard sh2.add("Angl", unitFloatValue("#Ang", 45.0))
+    var d2 = newDescriptor("null")
+    discard d2.add("DrSh", descriptorValue(sh2))
+    check parseLfx2(lfx2Payload(d2)).get().effects[0].angle == 45.0f32
 
   test "outer glow parses paint spread range technique":
     var gl = newDescriptor("OrGl")

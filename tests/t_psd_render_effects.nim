@@ -41,7 +41,7 @@ proc shadowFx(angle, dist, size, spread: float64,
   discard sh.add("enab", boolValue(enabled))
   discard sh.add("Md  ", enumValue("BlnM", blend))
   discard sh.add("Opct", unitFloatValue("#Prc", opacity))
-  discard sh.add("Angl", doubleValue(angle))
+  discard sh.add("lagl", doubleValue(angle))
   discard sh.add("Dstn", doubleValue(dist))
   discard sh.add("blur", doubleValue(size))
   discard sh.add("Ckmt", doubleValue(spread * 100.0))
@@ -415,3 +415,75 @@ test "disabled inner glow paints nothing":
     extra = @[("lfx2", fx)])], 5, 5)
   check renderDocument(doc).getPixel(2, 1) ==
     Rgba(r: 255, g: 255, b: 255, a: 255)
+
+# --- inner shadow ---------------------------------------------------------------
+
+proc innerShadowFx(angle, dist, size, spread: float64,
+    color: array[3, float64], opacity = 100.0, blend = "Nrml",
+    enabled = true): seq[byte] =
+  var sh = newDescriptor("IrSh")
+  discard sh.add("enab", boolValue(enabled))
+  discard sh.add("Md  ", enumValue("BlnM", blend))
+  discard sh.add("Opct", unitFloatValue("#Prc", opacity))
+  discard sh.add("lagl", doubleValue(angle))
+  discard sh.add("Dstn", doubleValue(dist))
+  discard sh.add("blur", doubleValue(size))
+  discard sh.add("Ckmt", doubleValue(spread * 100.0))
+  var clr = newDescriptor("RGBC")
+  discard clr.add("Rd  ", doubleValue(color[0]))
+  discard clr.add("Grn ", doubleValue(color[1]))
+  discard clr.add("Bl  ", doubleValue(color[2]))
+  discard sh.add("Clr ", descriptorValue(clr))
+  discard sh.add("useGlobalAngle", boolValue(false))
+  var top = newDescriptor("null")
+  discard top.add("IrSh", descriptorValue(sh))
+  var w = initWriter()
+  w.putU32(0)
+  w.putU32(16)
+  w.writeDescriptorBody(top)
+  let s = w.toString()
+  spanBytes(Span(src: newStringSource(s), start: 0, stop: s.len))
+
+test "inner shadow size one darkens the edge pixel":
+  # Photoshop oracle: size 1 darkens the first pixel inside every edge to
+  # G 96 on orange, leaving the next pixel at 128. Wide layer so the
+  # probed edge is straight.
+  let fx = innerShadowFx(0, 0, 1, 0, [0.0, 0, 0])
+  let doc = docOfFx(@[pxLayer("org", 1, 1, 4, 9, 255, 128, 0,
+    extra = @[("lfx2", fx)])], 9, 5)
+  let img = renderDocument(doc)
+  check img.getPixel(4, 1) == Rgba(r: 191, g: 96, b: 0, a: 255)
+  check img.getPixel(4, 2) == Rgba(r: 255, g: 128, b: 0, a: 255)
+  check img.getPixel(1, 1) == Rgba(r: 143, g: 72, b: 0, a: 255)
+
+test "inner shadow size three ramps inward":
+  # Measured: 85, 114, 128 going in from a straight edge. The layer sits
+  # clear of the canvas edge so the blur reach reads real shape, not the
+  # canvas boundary.
+  let fx = innerShadowFx(0, 0, 3, 0, [0.0, 0, 0])
+  let doc = docOfFx(@[pxLayer("org", 3, 1, 9, 12, 255, 128, 0,
+    extra = @[("lfx2", fx)])], 15, 11)
+  let img = renderDocument(doc)
+  check img.getPixel(6, 3) == Rgba(r: 170, g: 86, b: 0, a: 255)
+  check img.getPixel(6, 4) == Rgba(r: 227, g: 114, b: 0, a: 255)
+  check img.getPixel(6, 5) == Rgba(r: 255, g: 128, b: 0, a: 255)
+
+test "inner shadow distance pushes a hard band":
+  # Size 0 keeps the hard band: distance 2 darkens two rows, then clean.
+  let fx = innerShadowFx(90, 2, 0, 0, [0.0, 0, 0])
+  let doc = docOfFx(@[pxLayer("wht", 1, 1, 8, 4, 255, 255, 255,
+    extra = @[("lfx2", fx)])], 5, 11)
+  let img = renderDocument(doc)
+  check img.getPixel(2, 1) == Rgba(r: 0, g: 0, b: 0, a: 255)
+  check img.getPixel(2, 2) == Rgba(r: 0, g: 0, b: 0, a: 255)
+  check img.getPixel(2, 3) == Rgba(r: 255, g: 255, b: 255, a: 255)
+  check img.getPixel(1, 4) == Rgba(r: 255, g: 255, b: 255, a: 255)
+  check img.getPixel(3, 4) == Rgba(r: 255, g: 255, b: 255, a: 255)
+  check img.getPixel(2, 7) == Rgba(r: 255, g: 255, b: 255, a: 255)
+
+test "disabled inner shadow paints nothing":
+  let fx = innerShadowFx(0, 0, 1, 0, [0.0, 0, 0], enabled = false)
+  let doc = docOfFx(@[pxLayer("org", 1, 1, 6, 4, 255, 128, 0,
+    extra = @[("lfx2", fx)])], 7, 5)
+  check renderDocument(doc).getPixel(3, 1) ==
+    Rgba(r: 255, g: 128, b: 0, a: 255)
