@@ -1525,9 +1525,9 @@ proc tentKernelNim*(w: float64): tuple[radius: int, taps: seq[float64]] =
       t[i + j] += x * y
   ((t.len - 1) div 2, t)
 
-proc blurPlaneNim*(plane: var seq[float64], w, h: int, size: float64) =
-  ## Two separable box passes (a tent), zero outside the plane.
-  let (radius, taps) = tentKernelNim(size)
+proc blurSeparableNim*(plane: var seq[float64], w, h: int,
+    taps: openArray[float64], radius: int) =
+  ## Two separable passes of one kernel, zero outside the plane.
   if radius == 0 or plane.len == 0: return
   var tmp = newSeq[float64](w * h)
   for y in 0 ..< h:
@@ -1544,6 +1544,18 @@ proc blurPlaneNim*(plane: var seq[float64], w, h: int, size: float64) =
         let yy = y + i - radius
         if yy >= 0 and yy < h: acc += tmp[yy * w + x] * kv
       plane[y * w + x] = acc
+
+proc blurPlaneNim*(plane: var seq[float64], w, h: int, size: float64) =
+  ## Two separable box passes (a tent), zero outside the plane.
+  let (radius, taps) = tentKernelNim(size)
+  if radius == 0 or plane.len == 0: return
+  blurSeparableNim(plane, w, h, taps, radius)
+
+proc sizeOneBlurNim*(plane: var seq[float64], w, h: int) =
+  ## The Size 1 falloff: split the width-1 box into two half taps and take
+  ## it twice, a quarter-strength pixel on either side of a hard edge.
+  const taps = [0.25, 0.5, 0.25]
+  blurSeparableNim(plane, w, h, taps, 1)
 
 proc dilatePlaneNim*(plane: var seq[float64], w, h: int, radius: int) =
   ## Box max-filter dilation, separable row then column passes. The plane is
@@ -1795,6 +1807,99 @@ proc applyColorOverlays*(doc: Document, index: int, li: var LayerImage) =
         px.b = uint8(int(px.b) + (int(bl.b) - int(px.b)) * op div 255)
         li.img.setPixel(x, y, px)
 
+proc applyInnerGlows*(doc: Document, index: int, li: var LayerImage) =
+  ## Tint one layer's pixels with its enabled inner glows, first listed on
+  ## top. Built from the edge inward like the reference: spread dilation and
+  ## blur of the inverted shape (with the Size 1 taps), a range stretch,
+  ## center-source inversion, then the shape's own alpha. Solid color only;
+  ## precise technique and gradient paint stay unpainted, custom contours
+  ## read as linear.
+  let layer = doc.layers()[index]
+  let fx = effectsOf(layer)
+  if fx.isNone or not fx.get().master: return
+  if li.img.isEmpty(): return
+  let r = layer.rect
+  let liw = li.img.width
+  let lih = li.img.height
+  if liw <= 0 or lih <= 0: return
+  let mask = if layer.layerMask().isSome or layer.hasVectorMask:
+               initMaskSampler(doc, index)
+             else: MaskSampler()
+  let effects = fx.get().effects
+  for i in countdown(effects.high, 0):
+    let e = effects[i]
+    if e.kind != ekInnerGlow or not e.common.enabled: continue
+    if e.glowPrecise or e.glowGradient: continue
+    let spreadR = int(round(float64(e.glowSpread) * float64(e.glowBlur)))
+    let blurW = float64(e.glowBlur) * (1.0 - float64(e.glowSpread))
+    let (blurR, _) = tentKernelNim(blurW)
+    let m = blurR + spreadR + 2
+    let x0 = max(int(r.left) - m, 0)
+    let y0 = max(int(r.top) - m, 0)
+    let x1 = int(r.right) + m
+    let y1 = int(r.bottom) + m
+    if x1 <= x0 or y1 <= y0: continue
+    let pw = x1 - x0
+    let ph = y1 - y0
+    var plane = newSeq[float64](pw * ph)
+    for y in y0 ..< y1:
+      for x in x0 ..< x1:
+        if x < int(r.left) or x >= int(r.right) or y < int(r.top) or
+            y >= int(r.bottom):
+          plane[(y - y0) * pw + (x - x0)] = 1.0
+        else:
+          let a = int(li.img.getPixel(x - int(r.left), y - int(r.top)).a)
+          var mv = 255
+          if mask.present: mv = mask.sampleAt(x, y)
+          plane[(y - y0) * pw + (x - x0)] =
+            1.0 - float64(a) * float64(mv) / (255.0 * 255.0)
+    dilatePlaneNim(plane, pw, ph, spreadR)
+    if e.glowBlur == 1.0f32 and e.glowSpread == 0.0f32:
+      sizeOneBlurNim(plane, pw, ph)
+    else:
+      blurPlaneNim(plane, pw, ph, blurW)
+    var rng = float64(e.glowRange)
+    if rng != rng: rng = 1.0
+    else: rng = clamp(rng, 0.01, 1.0)
+    for y in y0 ..< y1:
+      for x in x0 ..< x1:
+        var v = min(plane[(y - y0) * pw + (x - x0)] / rng, 1.0)
+        if e.glowCenter: v = 1.0 - v
+        var s = 0.0
+        if x >= int(r.left) and x < int(r.right) and y >= int(r.top) and
+            y < int(r.bottom):
+          let a = int(li.img.getPixel(x - int(r.left), y - int(r.top)).a)
+          var mv = 255
+          if mask.present: mv = mask.sampleAt(x, y)
+          s = float64(a) * float64(mv) / (255.0 * 255.0)
+        plane[(y - y0) * pw + (x - x0)] = v * s
+    let smode =
+      if e.common.blend.len == 0: bmScreen
+      else: effectBlendModeFromKey(e.common.blend)
+    let dissolve = smode == bmDissolve
+    var opBase = e.common.opacity
+    if e.raw.get("Opct").isNone: opBase = 0.75f32
+    let sr = uint8(clamp(int(round(float64(e.glowColor[0]))), 0, 255))
+    let sg = uint8(clamp(int(round(float64(e.glowColor[1]))), 0, 255))
+    let sb = uint8(clamp(int(round(float64(e.glowColor[2]))), 0, 255))
+    for y in y0 ..< y1:
+      for x in x0 ..< x1:
+        if x < int(r.left) or x >= int(r.right) or y < int(r.top) or
+            y >= int(r.bottom):
+          continue
+        let cov = plane[(y - y0) * pw + (x - x0)]
+        if cov <= 0.0: continue
+        let op = clamp(int(round(cov * float64(opBase) * 255.0)), 0, 255)
+        if op <= 0: continue
+        if dissolve and not dissolveKeeps(x, y, op): continue
+        var px = li.img.getPixel(x - int(r.left), y - int(r.top))
+        if px.a == 0: continue
+        let bl = blendRgb(smode, Rgba(r: sr, g: sg, b: sb, a: 255), px)
+        px.r = uint8(int(px.r) + (int(bl.r) - int(px.r)) * op div 255)
+        px.g = uint8(int(px.g) + (int(bl.g) - int(px.g)) * op div 255)
+        px.b = uint8(int(px.b) + (int(bl.b) - int(px.b)) * op div 255)
+        li.img.setPixel(x - int(r.left), y - int(r.top), px)
+
 proc groupIsIsolated(l: LayerRecord): bool =
   ## Whether a group's children are composited as a unit rather than blended
   ## straight into the backdrop beneath the group.
@@ -1848,6 +1953,7 @@ proc renderSiblings(doc: Document, nodes: seq[LayerNode], canvas: var ImageBuf,
         continue
       var li = doc.layerImage(idx)
       applyColorOverlays(doc, idx, li)
+      applyInnerGlows(doc, idx, li)
       applyDropShadows(doc, idx, li, canvas, groupOpacity, base)
       applyOuterGlows(doc, idx, li, canvas, groupOpacity, base)
       blendLayerOnto(doc, idx, li, canvas, groupOpacity, base)

@@ -169,6 +169,21 @@ suite "effects: lfx2 descriptor":
     let e = parseLfx2(lfx2Payload(d)).get().effects[0]
     check e.overlayColor == [0.0f32, 0.0f32, 0.0f32]
 
+  test "inner glow parses source and range":
+    var gl = newDescriptor("IrGl")
+    discard gl.add("enab", boolValue(true))
+    discard gl.add("Ckmt", doubleValue(30.0))
+    discard gl.add("Inpr", doubleValue(40.0))
+    discard gl.add("glwS", enumValue("glwS", "SrcC"))
+    var d = newDescriptor("null")
+    discard d.add("IrGl", descriptorValue(gl))
+    let e = parseLfx2(lfx2Payload(d)).get().effects[0]
+    check e.kind == ekInnerGlow
+    check e.glowCenter
+    check abs(e.glowSpread - 0.3f32) < 1e-6
+    check abs(e.glowRange - 0.4f32) < 1e-6
+    check not e.glowPrecise
+
   test "short payload stays none, not a crash":
     check parseLfx2(Span(src: newStringSource("\x00\x01"),
       start: 0, stop: 2)).isNone

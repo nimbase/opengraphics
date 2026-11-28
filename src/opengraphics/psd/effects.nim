@@ -48,6 +48,7 @@ type
       glowRange*: float32 ## 0..1 (`Inpr` percent, default 50)
       glowColor*: array[3, float32] ## 0..255 RGB (`Clr `, black when absent)
       glowGradient*: bool ## `Grad` paint present; gradient glows stay unpainted
+      glowCenter*: bool ## inner only: `glwS` SrcC paints from the center
     of ekColorOverlay:
       overlayColor*: array[3, float32] ## 0..255 RGB (`Clr `, black when absent)
     of ekBevelEmboss, ekSatin, ekGradientOverlay,
@@ -134,6 +135,7 @@ proc parseOne(key: string, d: Descriptor): Option[Effect] =
       col = [cc.getDouble("Rd  ", 0.0).float32,
         cc.getDouble("Grn ", 0.0).float32, cc.getDouble("Bl  ", 0.0).float32]
     let gt = d.get("GlwT")
+    let gs = d.get("glwS")
     some(Effect(raw: d, key: key, kind: k, common: c,
       glowSize: numOf(d, "Sz  ", 5.0), glowBlur: numOf(d, "blur", 5.0),
       glowPrecise: gt.isSome and gt.get().kind == vEnumerated and
@@ -141,7 +143,9 @@ proc parseOne(key: string, d: Descriptor): Option[Effect] =
       glowSpread: clamp(numOf(d, "Ckmt") / 100.0f32, 0.0f32, 1.0f32),
       glowRange: numOf(d, "Inpr", 50.0) / 100.0f32,
       glowColor: col,
-      glowGradient: d.get("Grad").isSome))
+      glowGradient: d.get("Grad").isSome,
+      glowCenter: k == ekInnerGlow and gs.isSome and
+        gs.get().kind == vEnumerated and gs.get().valueId.asString() == "SrcC"))
   of ekColorOverlay:
     var col = [0.0f32, 0.0f32, 0.0f32]
     let cd = d.getDescriptor("Clr ")

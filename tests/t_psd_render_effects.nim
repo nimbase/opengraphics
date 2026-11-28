@@ -336,3 +336,82 @@ test "overlay master switch off paints nothing":
     extra = @[("lfx2", fx)])], 1, 1)
   check renderDocument(doc).getPixel(0, 0) ==
     Rgba(r: 255, g: 0, b: 0, a: 255)
+
+# --- inner glow ---------------------------------------------------------------
+
+proc innerGlowFx(size, spread, rng: float64, color: array[3, float64],
+    opacity = 100.0, blend = "Nrml", center = false,
+    precise = false, gradient = false, enabled = true): seq[byte] =
+  var gl = newDescriptor("IrGl")
+  discard gl.add("enab", boolValue(enabled))
+  discard gl.add("Md  ", enumValue("BlnM", blend))
+  discard gl.add("Opct", unitFloatValue("#Prc", opacity))
+  discard gl.add("blur", doubleValue(size))
+  discard gl.add("Ckmt", doubleValue(spread * 100.0))
+  discard gl.add("Inpr", doubleValue(rng * 100.0))
+  if center:
+    discard gl.add("glwS", enumValue("glwS", "SrcC"))
+  if precise:
+    discard gl.add("GlwT", enumValue("GlwT", "PrBL"))
+  var clr = newDescriptor("RGBC")
+  discard clr.add("Rd  ", doubleValue(color[0]))
+  discard clr.add("Grn ", doubleValue(color[1]))
+  discard clr.add("Bl  ", doubleValue(color[2]))
+  discard gl.add("Clr ", descriptorValue(clr))
+  if gradient:
+    discard gl.add("Grad", descriptorValue(newDescriptor("Grad")))
+  var top = newDescriptor("null")
+  discard top.add("IrGl", descriptorValue(gl))
+  var w = initWriter()
+  w.putU32(0)
+  w.putU32(16)
+  w.writeDescriptorBody(top)
+  let s = w.toString()
+  spanBytes(Span(src: newStringSource(s), start: 0, stop: s.len))
+
+test "inner glow burns inward from the edge":
+  let fx = innerGlowFx(2, 0, 0.5, [255.0, 0, 0])
+  let doc = docOfFx(@[pxLayer("wht", 1, 1, 4, 4, 255, 255, 255,
+    extra = @[("lfx2", fx)])], 5, 5)
+  let img = renderDocument(doc)
+  check img.getPixel(2, 2) == Rgba(r: 255, g: 135, b: 135, a: 255)
+  check img.getPixel(2, 1) == Rgba(r: 255, g: 84, b: 84, a: 255)
+  check img.getPixel(1, 1) == Rgba(r: 255, g: 48, b: 48, a: 255)
+  check img.getPixel(0, 0).a == 0
+
+test "inner glow center source burns outward":
+  let fx = innerGlowFx(2, 0, 0.5, [255.0, 0, 0], center = true)
+  let doc = docOfFx(@[pxLayer("wht", 1, 1, 4, 4, 255, 255, 255,
+    extra = @[("lfx2", fx)])], 5, 5)
+  let img = renderDocument(doc)
+  check img.getPixel(2, 2) == Rgba(r: 255, g: 120, b: 120, a: 255)
+  check img.getPixel(2, 1) == Rgba(r: 255, g: 171, b: 171, a: 255)
+
+test "inner glow size one uses the narrow falloff":
+  let fx = innerGlowFx(1, 0, 0.5, [255.0, 0, 0])
+  let doc = docOfFx(@[pxLayer("wht", 1, 1, 4, 4, 255, 255, 255,
+    extra = @[("lfx2", fx)])], 5, 5)
+  let img = renderDocument(doc)
+  check img.getPixel(2, 2) == Rgba(r: 255, g: 255, b: 255, a: 255)
+  check img.getPixel(2, 1) == Rgba(r: 255, g: 127, b: 127, a: 255)
+
+test "inner glow precise stays unpainted":
+  let fx = innerGlowFx(2, 0, 0.5, [255.0, 0, 0], precise = true)
+  let doc = docOfFx(@[pxLayer("wht", 1, 1, 4, 4, 255, 255, 255,
+    extra = @[("lfx2", fx)])], 5, 5)
+  check renderDocument(doc).getPixel(2, 1) ==
+    Rgba(r: 255, g: 255, b: 255, a: 255)
+
+test "inner glow gradient stays unpainted":
+  let fx = innerGlowFx(2, 0, 0.5, [255.0, 0, 0], gradient = true)
+  let doc = docOfFx(@[pxLayer("wht", 1, 1, 4, 4, 255, 255, 255,
+    extra = @[("lfx2", fx)])], 5, 5)
+  check renderDocument(doc).getPixel(2, 1) ==
+    Rgba(r: 255, g: 255, b: 255, a: 255)
+
+test "disabled inner glow paints nothing":
+  let fx = innerGlowFx(2, 0, 0.5, [255.0, 0, 0], enabled = false)
+  let doc = docOfFx(@[pxLayer("wht", 1, 1, 4, 4, 255, 255, 255,
+    extra = @[("lfx2", fx)])], 5, 5)
+  check renderDocument(doc).getPixel(2, 1) ==
+    Rgba(r: 255, g: 255, b: 255, a: 255)
