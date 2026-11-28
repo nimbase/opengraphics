@@ -23,14 +23,15 @@
   - Vector shapes and solid-color fills
   - Adjustment layers: all 16 keys typed (`levl`, `curv`, `hue2`, `brit`,
     `nvrt`, `thrs`, `post`, `expA`, `vibA`, `blnc`, `mixr`, `grdm`, `phfl`,
-    `selc`, `blwh`, `clrL`); anything unreadable stays raw. Nine evaluate
-    live when rendering (invert, threshold, posterize, levels,
+    `selc`, `blwh`, `clrL`); anything unreadable stays raw. All but color
+    lookup evaluate live when rendering (invert, threshold, posterize, levels,
     brightness/contrast legacy and modern, curves, exposure, channel mixer,
     black & white, photo filter, gradient map, color balance, selective color,
-    hue/saturation, vibrance); all but color lookup evaluate live
+    hue/saturation, vibrance); the lookup's profile payload carries no table
   - Layer effects: `lfx2` master switch + 10 kinds (drop/inner shadow,
     outer/inner glow, bevel, satin, color/gradient/pattern overlay,
-    stroke), including multi-lists
+    stroke), including multi-lists. Drop shadows, outer glow and color
+    overlays also composite; the rest stay parsed-only for now
   - Type layers: style runs, run lengths, fonts/sizes, tracking/leading,
     justifications, warp + text-space bounds
   - Smart objects: `SoLd`/`SoLE`/`PlLd` metadata, embedded/linked files
@@ -39,7 +40,8 @@
   - Fill layers: `SoCo`, `GrFl` (angle, stops, opacity stops) and `PtFl`
     (pattern reference, scale, angle, phase)
   - Document metadata: guides (1032 + 1092 colors), layer comps (1065),
-    duotone (+1066 alternates), channel names, notes (`Anno`)
+    duotone (+1066 alternates wired into the preview), channel names,
+    notes (`Anno` text; sound stays carried raw)
   - Indexed palette mapping and Lab-to-sRGB previews; multichannel falls
     back to a 3-plane preview instead of refusing to open
   - Layer-stack rendering: all 27 blend modes, per-pixel dissolve,
@@ -188,9 +190,10 @@ compositor catching up with the model, plus write-side authoring.
 ### Render from the parsed model
 - [x] All 27 blend modes, dissolve, group pass-through, opacity, clipping,
   masks, Blend If, vector-mask rasterisation
-- [ ] Layer effects composited per effect (drop shadows, outer glow and color
-  overlays live; inner glow/shadow, gradient/pattern overlays, stroke,
-  bevel, satin next)
+- [ ] Layer effects composited per effect (live: drop shadows, outer glow,
+  color overlays; next: inner glow/shadow, gradient/pattern overlays,
+  stroke, bevel, satin; precise techniques, custom contours and noise
+  stay unpainted for now)
 - [x] Adjustment layers applied as live adjustments instead of transparent layers
   (live: invert, threshold, posterize, levels, brightness/contrast legacy and
   modern, curves, exposure, channel mixer, black & white, photo filter,
@@ -210,7 +213,9 @@ compositor catching up with the model, plus write-side authoring.
 - [x] `GrFl`/`PtFl` fill content
 - [x] Indexed/Lab previews, multichannel fallback
 - [x] Guides, comps, duotone, channel names, notes
-- [ ] `FEid`/`FXid` cache use, book-ink preview wiring, sound annotations
+- [x] `FEid`/`FXid` envelope (placed id, rect, depth) and book-ink preview wiring
+- [ ] `FEid`/`FXid` plane decoding (the wire layout lives in an external
+  crate); sound annotations stay carried raw, nothing to render
 
 ### Write-side authoring
 - [x] PSD write done; unmodified files round-trip byte for byte
